@@ -280,6 +280,16 @@ Python ctypes, Linux x86_64'da büyük struct'ları by-value passing'te **stack 
 | Prefill throughput | ✅ hızlı | 1567 tok/s (200 token batch) |
 | Latency profili | ✅ stabil | min 28.7ms → max 44.1ms |
 
+### Context Stress Test Sonuçları
+
+| Context | Prompt | Prefill | Throughput | Generation |
+|---|---|---|---|---|
+| 8K | 2,001 tok | 1.2s | 1,737 tok/s | ✅ çalışıyor |
+| 32K | 28,000 tok | 23.5s | 1,192 tok/s | ✅ çalışıyor |
+| **40K (model max)** | **38,000 tok** | **37.1s** | **1,025 tok/s** | **✅ çalışıyor** |
+
+**Kritik bulgu:** Turbo3 V compression 40K context'te bile stabil — KV drift yok, generation tutarlı.
+
 ---
 
 ## ⚠️ Bilinen Sınırlamalar
