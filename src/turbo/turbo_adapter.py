@@ -107,13 +107,24 @@ class TurboBridge:
         )
 
     def tokenize(self, text: str) -> list[int]:
-        tokens = (ctypes.c_int * 1024)()
-        n = self.lib.turbo_tokenize(text.encode("utf-8"), tokens, 1024)
+        max_tokens = max(len(text) * 2, 131072)  # Support up to 128K tokens
+        tokens = (ctypes.c_int * max_tokens)()
+        n = self.lib.turbo_tokenize(text.encode("utf-8"), tokens, max_tokens)
         return list(tokens[:n]) if n > 0 else []
 
-    def decode(self, tokens: list[int], pos: int = 0) -> int:
-        arr = (ctypes.c_int * len(tokens))(*tokens)
-        return self.lib.turbo_decode(arr, len(tokens), pos)
+    def decode(self, tokens: list[int], pos: int = 0, chunk_size: int = 512) -> int:
+        if len(tokens) <= chunk_size:
+            arr = (ctypes.c_int * len(tokens))(*tokens)
+            return self.lib.turbo_decode(arr, len(tokens), pos)
+
+        # Chunked decode for large prefill
+        for start in range(0, len(tokens), chunk_size):
+            chunk = tokens[start : start + chunk_size]
+            arr = (ctypes.c_int * len(chunk))(*chunk)
+            ret = self.lib.turbo_decode(arr, len(chunk), pos + start)
+            if ret != 0:
+                return ret
+        return 0
 
     def get_logits(self) -> list[float]:
         ptr = self.lib.turbo_get_logits()

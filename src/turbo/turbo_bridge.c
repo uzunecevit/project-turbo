@@ -54,6 +54,17 @@ int turbo_decode(int *tokens, int n_tokens, int pos_offset) {
     return ret;
 }
 
+int turbo_decode_chunked(int *tokens, int n_tokens, int pos_offset, int chunk_size) {
+    if (!g_ctx) return -1;
+    if (chunk_size <= 0) chunk_size = 512;
+    for (int start = 0; start < n_tokens; start += chunk_size) {
+        int count = (start + chunk_size < n_tokens) ? chunk_size : (n_tokens - start);
+        int ret = turbo_decode(tokens + start, count, pos_offset + start);
+        if (ret != 0) return ret;
+    }
+    return 0;
+}
+
 const float *turbo_get_logits(void) {
     if (!g_ctx) return NULL;
     return llama_get_logits(g_ctx);
