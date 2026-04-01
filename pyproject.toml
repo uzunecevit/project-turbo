@@ -1,6 +1,6 @@
 [project]
 name = "project-turbo"
-version = "0.2.0"
+version = "0.3.0"
 description = "TurboQuant asimetrik K/V cache compression — zero-swap 128K context on consumer GPUs"
 requires-python = ">=3.11"
 dependencies = []

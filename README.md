@@ -4,27 +4,29 @@
 
 RTX 3060 (12GB VRAM) gibi tüketici sınıfı GPU'larda 128K context'i **swap'a düşmeden** çalıştırmak için TurboQuant asimetrik K/V cache sıkıştırması.
 
-```
+```python
 from turbo import TurboContext
+
 ctx = TurboContext(model_path="model.gguf", cache_type="turbo3")
-print(ctx.generate("Merhaba", max_tokens=100))
+text = ctx.generate("Merhaba", max_tokens=100)
+print(text)
+print(ctx.health())  # KV cache sağlık durumu
+ctx.bridge.free()
 ```
 
 ---
 
-## Ne Yaptık?
+## v0.3 Yenilikler
 
-PROJECT-TURBO, llama.cpp'nin deneysel **TurboQuant** quantizasyon formatlarını (2/3/4-bit KV cache) Python'a bağlayan bir **C bridge + ctypes adapter** katmanıdır.
-
-**Temel bulgular:**
-
-| Keşif | Detay |
+| Feature | Açıklama |
 |---|---|
-| **Asimetrik K/V** | K=q8_0 (korunmuş), V=turbo3 (sıkıştırılmış) → PPL +2.0% |
-| K sıkıştırması felaket | turbo3/turbo3 → PPL 3,556 (Qwen Q4_K_M) |
-| V sıkıştırması bedava | q8_0/turbo3 → PPL +1-5% (7 model doğrulandı) |
-| C bridge zorunlu | Python ctypes struct-by-value ABI sorunu → `turbo_bridge.c` |
-| Flash Attn gerekli | turbo3 için FA=ON zorunlu, aksi halde gizli hatalar |
+| **Handle-based bridge** | `turbo_handle_t` — multi-context desteği, seq_id ile future-proof |
+| **C-level perf metrics** | `llama_perf_context()` — gerçek decode latency (Python overhead hariç) |
+| **KV Monitor** | Entropy + saturation + repetition compound sinyal analizi |
+| **Memory retention** | 540+ token gap sonrası recall doğrulandı (2 model) |
+| **Reasoning tests** | Error amplification, key repetition, contradiction trap |
+| **Determinism tests** | Cross-reset identical, no KV leak kanıtı |
+| **Latency breakdown** | Prefill, decode, TTFT — C-level precision |
 
 ---
 
@@ -34,33 +36,37 @@ PROJECT-TURBO, llama.cpp'nin deneysel **TurboQuant** quantizasyon formatlarını
 Python Application / KAPTAN v4
        │
        ▼
-┌─────────────────────────────────────┐
-│  turbo_adapter.py                   │
-│  TurboContext / TurboLlama          │
-│  Top-p sampling, generate loop      │
-└──────────────┬──────────────────────┘
+┌─────────────────────────────────────────┐
+│  turbo_adapter.py                       │
+│  TurboContext (handle-based)            │
+│  KVMonitor (entropy/saturation)         │
+│  Top-p sampling, generate loop          │
+└──────────────┬──────────────────────────┘
                │ ctypes (basit tipler)
                ▼
-┌─────────────────────────────────────┐
-│  turbo_bridge.c                     │
-│  turbo_init / turbo_decode /        │
-│  turbo_tokenize / turbo_get_logits  │
-│  (struct-by-value C tarafında)      │
-└──────────────┬──────────────────────┘
+┌─────────────────────────────────────────┐
+│  turbo_bridge.c                         │
+│  turbo_load_model (shared, bir kez)     │
+│  turbo_ctx_init → turbo_handle_t        │
+│  turbo_ctx_decode / tokenize / logits   │
+│  turbo_ctx_perf_get (C-level timing)    │
+│  turbo_ctx_kv_state (utilization)       │
+│  (legacy API: backward compat wrapper)  │
+└──────────────┬──────────────────────────┘
                │
                ▼
-┌─────────────────────────────────────┐
-│  libllama.so (spiritbuun fork)      │
-│  • TurboQuant CUDA kernel'ları      │
-│  • Flash Attention                  │
-│  • K=q8_0, V=turbo3 (asimetrik)    │
-│  • Ampere SM 8.6 optimizasyonları   │
-└──────────────┬──────────────────────┘
+┌─────────────────────────────────────────┐
+│  libllama.so (spiritbuun fork)          │
+│  • TurboQuant CUDA kernel'ları          │
+│  • Flash Attention                      │
+│  • K=q8_0, V=turbo3 (asimetrik)        │
+│  • Ampere SM 8.6 optimizasyonları       │
+└──────────────┬──────────────────────────┘
                │
                ▼
-┌─────────────────────────────────────┐
-│  NVIDIA GPU (RTX 3060 12GB)         │
-└─────────────────────────────────────┘
+┌─────────────────────────────────────────┐
+│  NVIDIA GPU (RTX 3060 12GB)             │
+└─────────────────────────────────────────┘
 ```
 
 ---
@@ -112,7 +118,7 @@ gcc -shared -fPIC -o build/turbo_bridge.so \
     -L./build/bin -lllama -Wl,-rpath,./build/bin
 ```
 
-### 2. Kullan
+### 2. Kullan (v0.3 Handle-Based API)
 
 ```python
 from turbo import TurboContext
@@ -125,34 +131,68 @@ ctx = TurboContext(
     n_gpu_layers=-1,      # Tüm katmanlar GPU'da
 )
 
-# Greedy generation
+# Generate
 text = ctx.generate("Merhaba, benim adım", max_tokens=50, temperature=0.0)
-print(text)
 
-# Sampling generation
-text = ctx.generate("Yapay zeka nedir?", max_tokens=100, temperature=0.7, top_p=0.9)
-print(text)
+# KV cache sağlık durumu
+health = ctx.health()
+print(f"Status: {health['status']}, Saturation: {health['saturation']:.1%}")
 
 # Temizle
-ctx.clear_cache()  # KV cache temizle (yeni prompt için)
-ctx.bridge.free()
+ctx.clear_cache()   # KV cache sıfırla
+ctx.bridge.free()   # Context serbest bırak
 ```
 
-### 3. Düşük Seviye API
+### 3. KV Monitor
+
+```python
+# Generate with monitoring
+text = ctx.generate("Bir hikaye yaz", max_tokens=200, monitor=True)
+
+# Sağlık raporu
+health = ctx.health()
+# {
+#   "status": "ok",
+#   "saturation": 0.05,
+#   "avg_entropy": 1.6,
+#   "repetition": 0.0,
+#   "tokens_decoded": 200,
+#   "warnings": []
+# }
+
+# Latency raporu
+latency = ctx.monitor.latency_summary()
+# {
+#   "prefill_ms": 65.8,
+#   "decode_ms": 1803.5,
+#   "decode_per_token_ms": 18.2,
+#   "tok_per_sec": 54.9
+# }
+```
+
+### 4. Düşük Seviye API (Handle-Based)
 
 ```python
 from turbo import TurboBridge
 
 bridge = TurboBridge()
-bridge.init("model.gguf", 4096, type_k=8, type_v=41)  # K=q8_0, V=turbo3
+bridge.load_model("model.gguf", n_gpu_layers=-1)      # Model yükle (bir kez)
+handle = bridge.ctx_init(4096, type_k=8, type_v=41)   # K=q8_0, V=turbo3
 
-tokens = bridge.tokenize("Hello")
-bridge.decode(tokens, pos=0)
-logits = bridge.get_logits()
+tokens = bridge.ctx_tokenize("Hello")
+bridge.ctx_decode(tokens, pos=0)
+logits = bridge.ctx_get_logits()
 
-# Token seçimi
-best = logits.index(max(logits))
-print(bridge.token_to_piece(best))
+# C-level performans
+perf = bridge.perf_get()
+print(f"Decode: {perf.t_eval_ms:.1f}ms / {perf.n_eval} tokens")
+
+# KV durumu
+kv = bridge.kv_state()
+print(f"KV: {kv.n_pos}/{kv.n_ctx} ({kv.utilization:.1%})")
+
+bridge.ctx_free()          # Context serbest
+bridge.unload_model()      # Model serbest
 ```
 
 ---
@@ -166,12 +206,12 @@ PROJECT-TURBO/
 │   │   ├── include/llama.h      # C API header
 │   │   ├── ggml/                # GGML backend
 │   │   └── src/                 # llama.cpp kaynak kodu
-│   └── turbo/                   # Python adapter (48KB)
-│       ├── __init__.py          # v0.2.0 public API
-│       ├── turbo_adapter.py     # TurboContext / TurboBridge
-│       ├── turbo_bridge.c       # C wrapper (struct ABI fix)
+│   └── turbo/                   # Python adapter (v0.3)
+│       ├── __init__.py          # v0.3.0 public API
+│       ├── turbo_adapter.py     # TurboContext / TurboBridge / KVMonitor
+│       ├── turbo_bridge.c       # Handle-based C bridge + perf metrics
 │       └── enums.py             # Auto-generated enum'lar
-├── build/                       # Derlenmiş .so dosyaları (454MB)
+├── build/                       # Derlenmiş .so dosyaları
 │   ├── libllama.so              # TurboQuant-enabled llama.cpp
 │   ├── libggml-cuda.so          # CUDA backend
 │   ├── libggml-cpu.so           # CPU backend
@@ -181,13 +221,16 @@ PROJECT-TURBO/
 │   └── extract_enums.py         # ggml.h → enums.py parser
 ├── tests/
 │   ├── test_turbo_smoke.py      # Smoke test (model gerektirmez)
-│   └── test_turbo_inference.py  # Inference test (13 test, model gerekli)
+│   ├── test_turbo_inference.py  # Inference test (13 test)
+│   ├── test_stress.py           # Stress test (5 test: 1024 tok, A/B, KV)
+│   ├── test_reasoning.py        # Reasoning chain (7 test: math, memory)
+│   ├── test_determinism.py      # Determinism (4 test: cross-reset)
+│   └── test_latency.py          # Latency breakdown (5 test: C-level)
 ├── examples/
 │   └── 128k_inference.py        # 128K context demo
-├── config/                      # Gelecek konfigürasyonlar
 ├── README.md
 ├── pyproject.toml               # Sıfır bağımlılık
-└── Proje_İlerleme_Raporu.md     # Detaylı teknik rapor
+└── CONTRIBUTING.md              # Katkı rehberi
 ```
 
 ---
@@ -199,18 +242,24 @@ PROJECT-TURBO/
 LD_LIBRARY_PATH=./build/bin PYTHONPATH=src python tests/test_turbo_smoke.py
 
 # Inference test (model gerekli)
-LD_LIBRARY_PATH=./build/bin PYTHONPATH=src python -c "
-from turbo import TurboContext
-ctx = TurboContext(model_path='model.gguf', cache_type='turbo3')
-print(ctx.generate('Hello', max_tokens=20))
-"
+TURBO_TEST_MODEL=model.gguf LD_LIBRARY_PATH=./build/bin PYTHONPATH=src \
+    python tests/test_turbo_inference.py
 
-# 128K context demo
-LD_LIBRARY_PATH=./build/bin PYTHONPATH=src \
-    python examples/128k_inference.py \
-    --model model.gguf \
-    --n-ctx 131072 \
-    --cache-type turbo3
+# Stress test (1024 tok drift, A/B quality, KV recovery)
+TURBO_STRESS_MODEL=model.gguf LD_LIBRARY_PATH=./build/bin PYTHONPATH=src \
+    python tests/test_stress.py
+
+# Reasoning chain test (error amplification, memory retention)
+TURBO_TEST_MODEL=model.gguf LD_LIBRARY_PATH=./build/bin PYTHONPATH=src \
+    python tests/test_reasoning.py
+
+# Determinism test (cross-reset, KV leak)
+TURBO_TEST_MODEL=model.gg.gguf LD_LIBRARY_PATH=./build/bin PYTHONPATH=src \
+    python tests/test_determinism.py
+
+# Latency breakdown (C-level perf)
+TURBO_TEST_MODEL=model.gguf LD_LIBRARY_PATH=./build/bin PYTHONPATH=src \
+    python tests/test_latency.py
 ```
 
 ---
@@ -234,19 +283,41 @@ TheTom'un TurboQuant araştırmasına göre, K ve V cache'leri **farklı işlevl
 | turbo4/turbo4 | 218 (felaket) |
 | turbo3/turbo3 | 3,556 (felaket) |
 
-### Neden C Bridge?
+### Memory Retention (v0.3 Bulgu)
 
-Python ctypes, Linux x86_64'da büyük struct'ları by-value passing'te **stack alignment** sorunu yaşıyor. `llama_init_from_model(model, params)` çağrısı C'de çalışırken Python ctypes'te segfault veriyor.
+540+ token gap sonrası recall **çalışıyor**. Model "anlamı" unutmuyor ama "ifade biçimi" değişebilir.
 
-**Çözüm:** `turbo_bridge.c` — struct passing'i C tarafında yapıp Python'a sadece basit tipler (`int`, `float*`) döndürüyoruz.
+| Model | Gap | B=47 | A=12 | Sonuç |
+|---|---|---|---|---|
+| Qwen3-8B | 542 tok | ✅ 47.0 | ❌ None | Kısmen çalışıyor |
+| Qwen3.5-9B | 543 tok | ✅ 47.0 | ✅ 12.0 | Çalışıyor |
 
-### spiritbuun Fork
+### Mimari Bağımsızlık (v0.3)
 
-`spiritbuun/llama-cpp-turboquant-cuda` — en aktif TurboQuant CUDA fork:
-- 295 ⭐, 21 fork
-- TURBO3_0/TURBO4_0/TURBO2_0 enum'ları destekliyor
-- Flash Attention + CUDA F16 + FA_ALL_QUANTS
-- Norm correction (PPL iyileştirmesi)
+TurboQuant transformer-specific değil — hybrid SSM+attention mimarilerinde de çalışıyor:
+
+| Model | Mimari | Inference | 1024 tok drift | Memory |
+|---|---|---|---|---|
+| Qwen3-8B | Pure attention | 13/13 ✅ | ✅ (32 tok/s) | Kısmi |
+| Qwen3.5-9B | SSM+Attention | 13/13 ✅ | ✅ (25 tok/s) | ✅ |
+
+**Ama:** Hybrid mimari V compression'a daha hassas (A/B quality: 33.7% vs 51.4%).
+
+### C-Level Performance (v0.3)
+
+| Metrik | Qwen3-8B | Qwen3.5-9B |
+|---|---|---|
+| Decode (C-level) | 18 ms/tok | 20 ms/tok |
+| Throughput (C) | 55 tok/s | 50 tok/s |
+| Throughput (Wall) | 32 tok/s | 25 tok/s |
+| TTFT (200 tok) | 134ms | 158ms |
+| Saturation (1024 tok) | 7.7% | 5.4% |
+
+### Determinism (v0.3)
+
+- **Cross-reset:** Aynı prompt → aynı output (greedy, temperature=0) ✅
+- **No KV leak:** `clear_cache()` sonrası injected context sızıntısı yok ✅
+- **Key repetition:** 20x tekrar → 84729 doğru hatırlanıyor ✅
 
 ---
 
@@ -262,25 +333,24 @@ Python ctypes, Linux x86_64'da büyük struct'ları by-value passing'te **stack 
 
 ### Doğrulanmış Modeller
 
-| Model | Boyut | Mimari | Vocab | Test | 10 Token (greedy) |
-|---|---|---|---|---|---|
-| Qwen-4B-Q4_K_M | 2.6 GB | qwen35 (hybrid SSM+Attn) | 248,320 | ✅ 13/13 | 0.3s |
-| Qwen3-8B-Q4_K_M | 4.7 GB | qwen3 (pure attn) | 151,936 | ✅ 13/13 | 0.3s |
-| Qwen3.5-9B-Q4_K_M | 5.3 GB | qwen35 (hybrid SSM+Attn) | 248,320 | ✅ 13/13 | 0.4s |
+| Model | Boyut | Mimari | Vocab | Inference | Stress | Reasoning |
+|---|---|---|---|---|---|---|
+| Qwen3-8B-Q4_K_M | 4.7 GB | qwen3 (pure attn) | 151,936 | 13/13 ✅ | 5/5 ✅ | 5/7 ✅ |
+| Qwen3.5-9B-Q4_K_M | 5.3 GB | qwen35 (hybrid) | 248,320 | 13/13 ✅ | 5/5 ✅ | 5/7 ✅ |
 
 **Test ortamı:** RTX 3060 12GB, CUDA 13.2, K=q8_0, V=turbo3, Flash Attn=ON
 
-### Stress Test Sonuçları (Qwen3-8B)
+### Stress Test Sonuçları
 
-| Test | Sonuç | Detay |
+| Test | Qwen3-8B | Qwen3.5-9B |
 |---|---|---|
-| 1024 token production | ✅ drift yok | 32.4 tok/s stabil, saturation 7.7% |
-| A/B kalite (q8_0 vs turbo3) | ✅ minimal kayıp | %51.4 karakter benzerliği |
-| KV corruption/recovery | ✅ tam | math + semantic correct |
-| Prefill throughput | ✅ hızlı | 1567 tok/s (200 token batch) |
-| Latency profili | ✅ stabil | min 28.7ms → max 44.1ms |
+| 1024 token production | ✅ 32 tok/s, drift yok | ✅ 25 tok/s, drift yok |
+| A/B kalite (q8_0 vs turbo3) | 51.4% benzerlik | 33.7% benzerlik |
+| KV corruption/recovery | ✅ | ⚠️ (math: model davranışı) |
+| Prefill throughput | 1567 tok/s | 1257 tok/s |
+| Saturation (1024 tok) | 7.7% | 5.4% |
 
-### Context Stress Test Sonuçları
+### Context Stress Test Sonuçları (Qwen3-8B)
 
 | Context | Prompt | Prefill | Throughput | Generation |
 |---|---|---|---|---|
@@ -288,16 +358,17 @@ Python ctypes, Linux x86_64'da büyük struct'ları by-value passing'te **stack 
 | 32K | 28,000 tok | 23.5s | 1,192 tok/s | ✅ çalışıyor |
 | **40K (model max)** | **38,000 tok** | **37.1s** | **1,025 tok/s** | **✅ çalışıyor** |
 
-**Kritik bulgu:** Turbo3 V compression 40K context'te bile stabil — KV drift yok, generation tutarlı.
-
 ---
 
 ## ⚠️ Bilinen Sınırlamalar
 
 - **Flash Attention zorunlu:** turbo3 için FA=ON gerekli, aksi halde gizli hatalar
 - **Asimetrik K zorunlu:** K=q8_0, turbo3 K ile birlikte kullanılmamalı (PPL felaketi)
-- **Tek sequence:** Multi-sequence henüz desteklenmiyor
+- **Hybrid mimari hassasiyeti:** SSM+attention modellerde A/B quality düşük (33.7%)
+- **Reasoning kırılganlığı:** Multi-step math zincirinde error accumulation
+- **Tek sequence:** Multi-sequence henüz desteklenmiyor (seq_id hazır ama aktif değil)
 - **GGUF-only:** Safetensors formatı desteklenmiyor
+- **no_perf default:** llama.cpp `no_perf=true` default → bridge'de `false` set edilmeli
 
 ---
 
