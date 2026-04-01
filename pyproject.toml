@@ -19,9 +19,9 @@ classifiers = [
 ]
 
 [project.urls]
-Homepage = "https://github.com/project-turbo/project-turbo"
-Repository = "https://github.com/project-turbo/project-turbo"
-Issues = "https://github.com/project-turbo/project-turbo/issues"
+Homepage = "https://github.com/uzunecevit/project-turbo"
+Repository = "https://github.com/uzunecevit/project-turbo"
+Issues = "https://github.com/uzunecevit/project-turbo/issues"
 
 [project.optional-dependencies]
 dev = ["pytest"]
