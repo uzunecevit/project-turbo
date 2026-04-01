@@ -205,7 +205,18 @@ Kcur (F32) → Quantize → RoPE inside quant domain → Store
 
 ---
 
-## 8. Kaynaklar
+## 8. Mevcut Olanaklar (spiritbuun-fork) — KEŞİF SONUÇLARI
+
+| Feature | spiritbuun'da | turboquant_plus'da | Not |
+|---|---|---|---|
+| **Sink Token** | ✅ `GGML_TURBO_SINK_TOKENS` | ✅ | Ortam değişkeni ile aktifleşir |
+| **Sparse V** | ✅ `fattn-vec.cuh` | ✅ | Threshold-based skip |
+| **turbo2/3/4** | ✅ Tam destek | ✅ | CUDA kernel'ları mevcut |
+| **FWHT** | ✅ `turbo-wht.cu` | ✅ | 128-element block |
+| **Boundary V** | ❌ YOK | ✅ | Implementasyon gerekli |
+| **RoPE öncesi quant** | ❌ YOK | ✅ | Pipeline refactor gerekli |
+
+**Kaynaklar**
 
 | Kaynak | URL | Not |
 |---|---|---|
