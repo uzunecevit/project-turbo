@@ -1,0 +1,46 @@
+# Build artifacts (derleme sırasında üretilir)
+build/
+build-cpu/
+*.so
+*.so.*
+*.o
+*.a
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+*.egg-info/
+dist/
+build-python/
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Cache
+.cache/
+.ruff_cache/
+.pytest_cache/
+
+# GGUF models (büyük dosyalar)
+*.gguf
+
+# CMake
+CMakeCache.txt
+CMakeFiles/
+cmake_install.cmake
+compile_commands.json
+Makefile
+
+# Worktree metadata
+src/llama-spiritbuun-cuda/.git/worktrees/
+src/llama-spiritbuun-cuda
+
