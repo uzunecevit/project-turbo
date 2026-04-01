@@ -180,7 +180,8 @@ PROJECT-TURBO/
 │   ├── build_turbo.sh           # Fork clone + cmake derleme
 │   └── extract_enums.py         # ggml.h → enums.py parser
 ├── tests/
-│   └── test_turbo_smoke.py      # Smoke test suite
+│   ├── test_turbo_smoke.py      # Smoke test (model gerektirmez)
+│   └── test_turbo_inference.py  # Inference test (13 test, model gerekli)
 ├── examples/
 │   └── 128k_inference.py        # 128K context demo
 ├── config/                      # Gelecek konfigürasyonlar
@@ -258,7 +259,16 @@ Python ctypes, Linux x86_64'da büyük struct'ları by-value passing'te **stack 
 | GCC | 15.2.1 |
 | Python | 3.14.3 |
 | OS | Linux x86_64 |
-| Model | Qwen3 8B Q4_K_M |
+
+### Doğrulanmış Modeller
+
+| Model | Boyut | Mimari | Vocab | Test | 10 Token (greedy) |
+|---|---|---|---|---|---|
+| Qwen-4B-Q4_K_M | 2.6 GB | qwen35 (hybrid SSM+Attn) | 248,320 | ✅ 13/13 | 0.3s |
+| Qwen3-8B-Q4_K_M | 4.7 GB | qwen3 (pure attn) | 151,936 | ✅ 13/13 | 0.3s |
+| Qwen3.5-9B-Q4_K_M | 5.3 GB | qwen35 (hybrid SSM+Attn) | 248,320 | ✅ 13/13 | 0.4s |
+
+**Test ortamı:** RTX 3060 12GB, CUDA 13.2, K=q8_0, V=turbo3, Flash Attn=ON
 
 ---
 
