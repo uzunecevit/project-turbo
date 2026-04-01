@@ -42,5 +42,4 @@ Makefile
 
 # Worktree metadata
 src/llama-spiritbuun-cuda/.git/worktrees/
-src/llama-spiritbuun-cuda
 
