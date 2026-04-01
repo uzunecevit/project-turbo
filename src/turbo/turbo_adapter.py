@@ -321,12 +321,23 @@ class TurboBridge:
         )
 
     def tokenize(self, text: str) -> list[int]:
+        if self._handle:
+            return self.ctx_tokenize(text)
         max_tokens = max(len(text) * 2, 131072)
         tokens = (ctypes.c_int * max_tokens)()
         n = self.lib.turbo_tokenize(text.encode("utf-8"), tokens, max_tokens)
         return list(tokens[:n]) if n > 0 else []
 
     def decode(self, tokens: list[int], pos: int = 0, chunk_size: int = 512) -> int:
+        if self._handle:
+            if len(tokens) <= chunk_size:
+                return self.ctx_decode(tokens, pos)
+            for start in range(0, len(tokens), chunk_size):
+                chunk = tokens[start : start + chunk_size]
+                ret = self.ctx_decode(chunk, pos + start)
+                if ret != 0:
+                    return ret
+            return 0
         if len(tokens) <= chunk_size:
             arr = (ctypes.c_int * len(tokens))(*tokens)
             return self.lib.turbo_decode(arr, len(tokens), pos)
@@ -340,23 +351,28 @@ class TurboBridge:
         return 0
 
     def get_logits(self) -> list[float]:
+        if self._handle:
+            return self.ctx_get_logits()
         ptr = self.lib.turbo_get_logits()
         nv = self.lib.turbo_n_vocab()
         return [ptr[i] for i in range(nv)]
 
     def n_vocab(self) -> int:
+        if self._handle:
+            return self.ctx_n_vocab()
         return self.lib.turbo_n_vocab()
 
     def token_to_piece(self, token: int) -> str:
+        if self._handle:
+            return self.ctx_token_to_piece(token)
         buf = ctypes.create_string_buffer(64)
         self.lib.turbo_token_to_piece(token, buf, 64)
         return buf.value.decode(errors="ignore")
 
     def free(self):
-        """Free — context handle if present, otherwise legacy cleanup."""
+        """Free context handle only. Model stays loaded for other contexts."""
         if self._handle:
             self.ctx_free()
-            self.unload_model()
         else:
             self.lib.turbo_free()
 

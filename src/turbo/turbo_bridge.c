@@ -90,6 +90,7 @@ turbo_handle_t *turbo_ctx_init(int n_ctx, int type_k, int type_v,
     cp.type_v         = type_v;
     cp.flash_attn_type = flash_attn;
     cp.offload_kqv    = offload_kqv;
+    cp.no_perf        = false;  /* enable C-level performance tracking */
 
     struct llama_context *ctx = llama_init_from_model(g_model, cp);
     if (!ctx) return NULL;
