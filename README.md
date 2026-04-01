@@ -270,6 +270,16 @@ Python ctypes, Linux x86_64'da büyük struct'ları by-value passing'te **stack 
 
 **Test ortamı:** RTX 3060 12GB, CUDA 13.2, K=q8_0, V=turbo3, Flash Attn=ON
 
+### Stress Test Sonuçları (Qwen3-8B)
+
+| Test | Sonuç | Detay |
+|---|---|---|
+| 1024 token production | ✅ drift yok | 32.4 tok/s stabil, saturation 7.7% |
+| A/B kalite (q8_0 vs turbo3) | ✅ minimal kayıp | %51.4 karakter benzerliği |
+| KV corruption/recovery | ✅ tam | math + semantic correct |
+| Prefill throughput | ✅ hızlı | 1567 tok/s (200 token batch) |
+| Latency profili | ✅ stabil | min 28.7ms → max 44.1ms |
+
 ---
 
 ## ⚠️ Bilinen Sınırlamalar
