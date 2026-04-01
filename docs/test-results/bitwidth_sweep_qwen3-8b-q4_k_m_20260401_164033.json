@@ -1,0 +1,86 @@
+{
+  "q8_0": {
+    "throughput_tps": 0.0,
+    "time_s": 0.0,
+    "memory_retention": {
+      "correct": false,
+      "got": null,
+      "preview": ""
+    },
+    "reasoning": {
+      "correct": false,
+      "got": 1.44,
+      "preview": "Let me try to solve this problem. \n\nLet me call the original number x. \n\nFirst, "
+    },
+    "key_repetition": {
+      "correct": true,
+      "got": 84729.0
+    }
+  },
+  "q8_0/turbo2": {
+    "throughput_tps": 33.7,
+    "time_s": 3.0,
+    "memory_retention": {
+      "correct": false,
+      "got": null,
+      "preview": ""
+    },
+    "reasoning": {
+      "correct": false,
+      "got": 0.8,
+      "preview": "Okay, let me try to figure out this problem. So, the question is: A number is in"
+    },
+    "key_repetition": {
+      "correct": true,
+      "got": 84729.0
+    },
+    "ab_quality": {
+      "char_similarity": 0.086,
+      "word_overlap": 0.173
+    }
+  },
+  "q8_0/turbo3": {
+    "throughput_tps": 33.0,
+    "time_s": 3.0,
+    "memory_retention": {
+      "correct": false,
+      "got": null,
+      "preview": ""
+    },
+    "reasoning": {
+      "correct": true,
+      "got": 100.0,
+      "preview": "Okay, let me try to figure out this problem. So, the question is: A number is in"
+    },
+    "key_repetition": {
+      "correct": true,
+      "got": 84729.0
+    },
+    "ab_quality": {
+      "char_similarity": 0.33,
+      "word_overlap": 0.375
+    }
+  },
+  "q8_0/turbo4": {
+    "throughput_tps": 33.3,
+    "time_s": 3.0,
+    "memory_retention": {
+      "correct": false,
+      "got": null,
+      "preview": ""
+    },
+    "reasoning": {
+      "correct": false,
+      "got": 1.0,
+      "preview": "Let me try to solve this problem. \n\nLet me call the original number x. \n\nFirst, "
+    },
+    "key_repetition": {
+      "correct": true,
+      "got": 84729.0
+    },
+    "ab_quality": {
+      "char_similarity": 0.558,
+      "word_overlap": 0.842
+    }
+  }
+}

@@ -1,0 +1,86 @@
+{
+  "q8_0": {
+    "throughput_tps": 0.0,
+    "time_s": 0.0,
+    "memory_retention": {
+      "correct": false,
+      "got": null,
+      "preview": ""
+    },
+    "reasoning": {
+      "correct": false,
+      "got": 75.0,
+      "preview": "Let the original number be $x$.\n\n1.  **Increase by 20%**:\n    The number becomes"
+    },
+    "key_repetition": {
+      "correct": true,
+      "got": 84729.0
+    }
+  },
+  "q8_0/turbo2": {
+    "throughput_tps": 25.5,
+    "time_s": 3.9,
+    "memory_retention": {
+      "correct": false,
+      "got": null,
+      "preview": ""
+    },
+    "reasoning": {
+      "correct": false,
+      "got": 0.0,
+      "preview": "Let the original number be $x$.\n\n1.  **Increase by 20%**:\n    The number becomes"
+    },
+    "key_repetition": {
+      "correct": false,
+      "got": 8.0
+    },
+    "ab_quality": {
+      "char_similarity": 0.066,
+      "word_overlap": 0.246
+    }
+  },
+  "q8_0/turbo3": {
+    "throughput_tps": 25.4,
+    "time_s": 3.9,
+    "memory_retention": {
+      "correct": false,
+      "got": null,
+      "preview": ""
+    },
+    "reasoning": {
+      "correct": false,
+      "got": 20.0,
+      "preview": "Let the original number be $x$.\n\n1.  **Increase by 20%**:\n    The number becomes"
+    },
+    "key_repetition": {
+      "correct": false,
+      "got": 8.0
+    },
+    "ab_quality": {
+      "char_similarity": 0.229,
+      "word_overlap": 0.264
+    }
+  },
+  "q8_0/turbo4": {
+    "throughput_tps": 25.1,
+    "time_s": 4.0,
+    "memory_retention": {
+      "correct": false,
+      "got": null,
+      "preview": ""
+    },
+    "reasoning": {
+      "correct": false,
+      "got": 75.0,
+      "preview": "Let the original number be $x$.\n\n1.  **Increase by 20%**:\n    The number becomes"
+    },
+    "key_repetition": {
+      "correct": true,
+      "got": 84729.0
+    },
+    "ab_quality": {
+      "char_similarity": 0.05,
+      "word_overlap": 0.277
+    }
+  }
+}
