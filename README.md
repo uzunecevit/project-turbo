@@ -391,6 +391,18 @@ TurboQuant transformer-specific değil — hybrid SSM+attention mimarilerinde de
 
 **2-PASS de-fusion mimari bağımsız:** Transformer, SSM, MoE — tüm mimarilerde EXACT MATCH.
 
+### Qwen3.5-9B Bitwidth Sweep (Hybrid SSM+Attention)
+
+| Config | Math | Key | Seq% | Not |
+|---|---|---|---|---|
+| q8_0/q8_0 | OK | OK | base | Ground truth |
+| q8_0/turbo4 | OK | OK | 64% | V turbo4 — Key bile OK (Qwen3'de FAIL) |
+| q8_0/turbo3 | OK | OK | 63% | V turbo3 — Math bile OK (Qwen3'de FAIL) |
+| turbo4/turbo4 | OK | OK | 69% | **En yüksek kalite** |
+| turbo3/turbo3 | FAIL | OK | 60% | K=Turbo3 hâlâ felaket |
+
+**Qwen3.5-9B V compression'a çok toleranslı** — hybrid mimari SSM katmanları V hassasiyetini azaltıyor.
+
 **Test ortamı:** RTX 3060 12GB, CUDA 13.2, K=turbo4, V_low=turbo3, V_high=turbo4, TURBO_2PASS_SPLIT=1
 
 ### Stress Test Sonuçları
