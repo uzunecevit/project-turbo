@@ -66,12 +66,28 @@ LD_LIBRARY_PATH=./build/bin PYTHONPATH=src pytest tests/test_turbo_smoke.py::tes
 LD_LIBRARY_PATH=./build/bin PYTHONPATH=src python tests/test_turbo_smoke.py
 ```
 
-### Stress / reasoning / bitwidth sweep tests
+### Stress / reasoning / bitwidth sweep / 2-PASS tests
 ```bash
-TURBO_TEST_MODEL=/path/to/model.gguf LD_LIBRARY_PATH=./build/bin PYTHONPATH=src python tests/test_stress.py
-TURBO_TEST_MODEL=/path/to/model.gguf LD_LIBRARY_PATH=./build/bin PYTHONPATH=src python tests/test_reasoning.py
 TURBO_TEST_MODEL=/path/to/model.gguf LD_LIBRARY_PATH=./build/bin PYTHONPATH=src python tests/test_bitwidth_sweep.py
+TURBO_TEST_MODEL=/path/to/model.gguf PYTHONPATH=src LD_LIBRARY_PATH=./build/bin python tests/test_2pass_validation.py
+TURBO_TEST_MODEL=/path/to/model.gguf PYTHONPATH=src LD_LIBRARY_PATH=./build/bin python tests/test_sampling_quick.py
+TURBO_TEST_MODEL=/path/to/model.gguf PYTHONPATH=src LD_LIBRARY_PATH=./build/bin python tests/test_long_ctx_quick.py
 ```
+
+### 2-PASS mode (requires ENV vars)
+```bash
+GGML_CUDA_DISABLE_GRAPHS=1 TURBO_2PASS_SPLIT=1 TURBO_RECENT_WINDOW=64 \
+    TURBO_TEST_MODEL=/path/to/model.gguf PYTHONPATH=src LD_LIBRARY_PATH=./build/bin \
+    python tests/test_2pass_validation.py
+```
+
+### ENV Variables (v1.0)
+| ENV | Default | Description |
+|-----|---------|-------------|
+| `TURBO_2PASS_SPLIT` | (unset) | 1 → enable 2-PASS split attention |
+| `TURBO_RECENT_WINDOW` | 256 | V_high (Turbo4) window size |
+| `GGML_CUDA_DISABLE_GRAPHS` | (unset) | 1 → disable CUDA graphs (required for 2-PASS) |
+| `TURBO_PREFILL_VEC` | (unset) | 1 → force vec kernel for debug |
 
 ## Code Style
 
@@ -111,5 +127,5 @@ TURBO_TEST_MODEL=/path/to/model.gguf LD_LIBRARY_PATH=./build/bin PYTHONPATH=src 
 ### Key Constraints
 - **Never hardcode enum values** — use `scripts/extract_enums.py` to regenerate `enums.py`.
 - **Never use ctypes struct-by-value passing** for large structs — use `turbo_bridge.c` instead (ABI alignment issues on Linux x86_64).
-- **K must always be `q8_0`** — compressing K with turbo causes PPL degradation due to softmax exponential error growth.
+- **K must always be `q8_0` or `turbo4`** — K=turbo3 causes reasoning collapse (Math FAIL). V can be turbo3/turbo4 freely.
 - **Zero Python dependencies** — do not add `import numpy`, `import torch`, etc. to the `turbo` package.

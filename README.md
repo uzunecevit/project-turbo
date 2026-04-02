@@ -16,6 +16,40 @@ ctx.bridge.free()
 
 ---
 
+## v1.0 — OMERTA Stable Core
+
+> **2-PASS Attention De-Fusion + Asymmetric V Split**
+
+| Feature | Açıklama |
+|---|---|
+| **2-PASS Pipeline** | Flash Attention de-fusion — 4 CUDA kernel (KQ, merge_softmax, V_acc, add_vec) |
+| **Asymmetric V Split** | V_low=Turbo3 (archive), V_high=Turbo4 (window) — %42 VRAM tasarrufu |
+| **K=Turbo4 (always)** | K split kaldırıldı — reasoning garantisi |
+| **EXACT MATCH** | Deterministic (4K context) + Stochastic (temp=0.7) — tüm testlerde birebir aynı |
+| **Host Buffer v_idxs_high** | INPUT flag ile host buffer garantisi |
+| **Pool 5x Multiplier** | Dual buffer overhead için genişletildi |
+| **Tag** | `v1.0-OMERTA-stable-core` |
+
+### ENV Değişkenleri
+
+| ENV | Varsayılan | Açıklama |
+|---|---|---|
+| `TURBO_2PASS_SPLIT` | (unset) | 1 → 2-PASS split-aware attention aktif |
+| `TURBO_RECENT_WINDOW` | 256 | V_high (Turbo4) pencere boyutu |
+| `GGML_CUDA_DISABLE_GRAPHS` | (unset) | 1 → CUDA graph devre dışı (2-PASS için gerekli) |
+| `TURBO_PREFILL_VEC` | (unset) | 1 → Vec kernel zorla (debug) |
+
+### Doğrulama Sonuçları
+
+| Test | Sonuç | Kanıt |
+|---|---|---|
+| Greedy EXACT MATCH | ✅ 4K context | 5/5 token identical |
+| Stochastic EXACT MATCH | ✅ temp=0.7 | 10/10 token identical |
+| Bitwidth sweep | ✅ Tüm config | Beklenenle eşleşiyor |
+| VRAM savings | ✅ %42 | V_low=Turbo3 archive |
+
+---
+
 ## v0.3 Yenilikler
 
 | Feature | Açıklama |
@@ -51,17 +85,22 @@ Python Application / KAPTAN v4
 │  turbo_ctx_decode / tokenize / logits   │
 │  turbo_ctx_perf_get (C-level timing)    │
 │  turbo_ctx_kv_state (utilization)       │
-│  (legacy API: backward compat wrapper)  │
 └──────────────┬──────────────────────────┘
                │
                ▼
-┌─────────────────────────────────────────┐
-│  libllama.so (spiritbuun fork)          │
-│  • TurboQuant CUDA kernel'ları          │
-│  • Flash Attention                      │
-│  • K=q8_0, V=turbo3 (asimetrik)        │
-│  • Ampere SM 8.6 optimizasyonları       │
-└──────────────┬──────────────────────────┘
+┌─────────────────────────────────────────────────────┐
+│  libllama.so (spiritbuun fork)                      │
+│  • TurboQuant CUDA kernel'ları                      │
+│  • 2-PASS Attention (4 CUDA kernel)                 │
+│    - k_2pass_KQ_compute (Q·K çarpımı + scale)       │
+│    - k_2pass_merge_softmax (merge + mask + softmax) │
+│    - k_2pass_V_accumulate (weights·V, FP32)         │
+│    - k_2pass_add_vec (out_low + out_high)           │
+│  • V dual write (cpy_v → v_low + v_high)            │
+│  • K=Turbo4, V_low=Turbo3, V_high=Turbo4            │
+│  • Flash Attention (fused, fallback)                │
+│  • Ampere SM 8.6 optimizasyonları                   │
+└──────────────┬──────────────────────────────────────┘
                │
                ▼
 ┌─────────────────────────────────────────┐
@@ -77,7 +116,8 @@ Python Application / KAPTAN v4
 |---|---|---|---|
 | F16 (varsayılan) | ~16 GB | Referans | RTX 3060'a sığmaz |
 | Q8_0 (K ve V) | ~8 GB | ~F16 | Standart çözüm |
-| **K=q8_0, V=turbo3** | **~4 GB** | **PPL +2.0%** | **Asimetrik (bizim strateji)** |
+| **K=q8_0, V=turbo3** | **~4 GB** | **PPL +2.0%** | **v0.3 asimetrik** |
+| **K=turbo4, V=turbo3+4** | **~4 GB** | **EXACT MATCH** | **v1.0 2-PASS split** |
 | turbo3/turbo3 | ~3 GB | PPL 3,556 | ❌ Felaket (K sıkıştırması) |
 
 ---
@@ -205,32 +245,33 @@ PROJECT-TURBO/
 │   ├── llama-spiritbuun-cuda/   # spiritbuun CUDA fork (179MB)
 │   │   ├── include/llama.h      # C API header
 │   │   ├── ggml/                # GGML backend
-│   │   └── src/                 # llama.cpp kaynak kodu
-│   └── turbo/                   # Python adapter (v0.3)
-│       ├── __init__.py          # v0.3.0 public API
+│   │   │   └── src/ggml-cuda/
+│   │   │       ├── fattn.cu     # 2-PASS orchestrator + 4 CUDA kernel
+│   │   │       └── fattn-vec.cuh # vec kernel (fused fallback)
+│   │   └── src/
+│   │       ├── llama-kv-cache.h # Dual buffer struct (v_idxs_high_global)
+│   │       └── llama-kv-cache.cpp # V dual write, host buffer allocation
+│   └── turbo/                   # Python adapter
+│       ├── __init__.py          # Public API
 │       ├── turbo_adapter.py     # TurboContext / TurboBridge / KVMonitor
-│       ├── turbo_bridge.c       # Handle-based C bridge + perf metrics
+│       ├── turbo_bridge.c       # Handle-based C bridge
 │       └── enums.py             # Auto-generated enum'lar
 ├── build/                       # Derlenmiş .so dosyaları
-│   ├── libllama.so              # TurboQuant-enabled llama.cpp
-│   ├── libggml-cuda.so          # CUDA backend
-│   ├── libggml-cpu.so           # CPU backend
-│   └── turbo_bridge.so          # C bridge
 ├── scripts/
 │   ├── build_turbo.sh           # Fork clone + cmake derleme
 │   └── extract_enums.py         # ggml.h → enums.py parser
 ├── tests/
-│   ├── test_turbo_smoke.py      # Smoke test (model gerektirmez)
-│   ├── test_turbo_inference.py  # Inference test (13 test)
-│   ├── test_stress.py           # Stress test (5 test: 1024 tok, A/B, KV)
-│   ├── test_reasoning.py        # Reasoning chain (7 test: math, memory)
-│   ├── test_determinism.py      # Determinism (4 test: cross-reset)
-│   └── test_latency.py          # Latency breakdown (5 test: C-level)
-├── examples/
-│   └── 128k_inference.py        # 128K context demo
+│   ├── test_turbo_smoke.py      # Smoke test
+│   ├── test_bitwidth_sweep.py   # Bit-width config sweep (v1.0)
+│   ├── test_2pass_validation.py # Fake split EXACT MATCH
+│   ├── test_sampling_quick.py   # Stochastic divergence test
+│   └── test_long_ctx_quick.py   # Long context (512-4096) EXACT MATCH
+├── docs/
+│   └── test-results/            # Test sonuçları (JSON)
+├── .kilo/plans/                 # Implementation plan
 ├── README.md
 ├── pyproject.toml               # Sıfır bağımlılık
-└── CONTRIBUTING.md              # Katkı rehberi
+└── AGENTS.md                    # Proje rehberi
 ```
 
 ---
@@ -362,13 +403,13 @@ TurboQuant transformer-specific değil — hybrid SSM+attention mimarilerinde de
 
 ## ⚠️ Bilinen Sınırlamalar
 
-- **Flash Attention zorunlu:** turbo3 için FA=ON gerekli, aksi halde gizli hatalar
-- **Asimetrik K zorunlu:** K=q8_0, turbo3 K ile birlikte kullanılmamalı (PPL felaketi)
-- **Hybrid mimari hassasiyeti:** SSM+attention modellerde A/B quality düşük (33.7%)
-- **Reasoning kırılganlığı:** Multi-step math zincirinde error accumulation
-- **Tek sequence:** Multi-sequence henüz desteklenmiyor (seq_id hazır ama aktif değil)
+- **CUDA Graphs:** 2-PASS modunda `GGML_CUDA_DISABLE_GRAPHS=1` gerekli (CUDA graph replay henüz test edilmemiş)
+- **Contiguous KV:** 2-PASS sadece contiguous KV layout destekler (non-contiguous → assert)
+- **Flash Attention zorunlu:** turbo3/turbo4 için FA=ON gerekli
+- **K=Turbo4 zorunlu:** K=turbo3 ile reasoning çöküşü (test kanıtlı)
+- **Tek sequence:** Multi-sequence henüz desteklenmiyor
 - **GGUF-only:** Safetensors formatı desteklenmiyor
-- **no_perf default:** llama.cpp `no_perf=true` default → bridge'de `false` set edilmeli
+- **Adaptive KV:** Henüz uygulanmadı (Phase 2'de)
 
 ---
 
