@@ -1,0 +1,394 @@
+diff --git a/ggml/src/ggml-cuda/fattn.cu b/ggml/src/ggml-cuda/fattn.cu
+index 512d76a..4416949 100644
+--- a/ggml/src/ggml-cuda/fattn.cu
++++ b/ggml/src/ggml-cuda/fattn.cu
+@@ -793,6 +793,374 @@ static best_fattn_kernel ggml_cuda_get_best_fattn_kernel(const int device, const
+     return BEST_FATTN_KERNEL_TILE;
+ }
+ 
++// ═══════════════════════════════════════════════════════════════
++// 2-PASS CUDA KERNELS — De-fused attention pipeline
++// ═══════════════════════════════════════════════════════════════
++
++// Kernel 1: Q·K compute (dequanted K in fp16, Q in fp32)
++// One block per query token, threads iterate over K rows.
++// Writes logits[n_kv] per query token.
++static __global__ void k_2pass_KQ_compute(
++        const float * __restrict__ Q,      // [D, n_heads, n_tokens_q]
++        const half  * __restrict__ K_fp16,  // [D, n_kv] (this slice)
++        float       * __restrict__ logits,  // [n_kv, n_heads, n_tokens_q] output
++        const int64_t D,
++        const int64_t n_kv,
++        const float scale,
++        const int64_t nb01,  // Q stride per token
++        const int64_t nb02)  // Q stride per head
++{
++    const int64_t kv_idx = blockIdx.x;
++    const int64_t head   = blockIdx.y;
++    const int64_t token  = blockIdx.z;
++
++    if (kv_idx >= n_kv) return;
++
++    const float * q_row = Q + token * nb01 + head * nb02;
++    const half  * k_row = K_fp16 + kv_idx * D;
++
++    float sum = 0.0f;
++    for (int64_t d = threadIdx.x; d < D; d += blockDim.x) {
++        sum += q_row[d] * __half2float(k_row[d]);
++    }
++
++    // Warp reduce
++    for (int offset = 16; offset > 0; offset >>= 1) {
++        sum += __shfl_down_sync(0xFFFFFFFF, sum, offset);
++    }
++
++    // Block reduce via shared memory
++    __shared__ float warp_sums[4];  // 128 threads / 32 = 4 warps
++    const int warp_id = threadIdx.x / 32;
++    const int lane_id = threadIdx.x % 32;
++    if (lane_id == 0) warp_sums[warp_id] = sum;
++    __syncthreads();
++
++    if (threadIdx.x == 0) {
++        float final_sum = warp_sums[0] + warp_sums[1] + warp_sums[2] + warp_sums[3];
++        logits[token * (gridDim.y * n_kv) + head * n_kv + kv_idx] = final_sum * scale;
++    }
++}
++
++// Kernel 2: Merge logits + causal mask + online softmax (single kernel, single pass)
++// One block per query token+head, threads iterate over all logits.
++// Computes global max across both low and high logits, then exp+sum+normalize.
++static __global__ void k_2pass_merge_softmax(
++        const float * __restrict__ logits_low,   // [n_low, n_heads, n_tokens_q]
++        const float * __restrict__ logits_high,  // [n_high, n_heads, n_tokens_q]
++        const half  * __restrict__ mask,         // causal mask [n_total, n_tokens_q] F16 or nullptr
++        float       * __restrict__ weights,      // [n_total, n_heads, n_tokens_q] output
++        const int64_t n_low,
++        const int64_t n_high,
++        const int64_t n_heads,
++        const int64_t n_tokens_q,
++        const int64_t base_kv,                   // KV cache write head offset
++        const int64_t mask_stride)               // mask stride in elements (0 if no mask)
++{
++    const int64_t head  = blockIdx.x;
++    const int64_t token = blockIdx.y;
++
++    const int64_t n_total = n_low + n_high;
++    const int64_t query_pos = base_kv + token;  // global query position
++
++    const float * ll = logits_low  + token * (n_heads * n_low)  + head * n_low;
++    const float * lh = logits_high + token * (n_heads * n_high) + head * n_high;
++
++    // Phase 1: Find global max (single reduction path)
++    float local_max = -1e30f;
++    for (int64_t i = threadIdx.x; i < n_total; i += blockDim.x) {
++        float val;
++        if (i < n_low) {
++            val = ll[i];
++        } else {
++            val = lh[i - n_low];
++        }
++        // Causal mask: kv_pos > query_pos → -INFINITY
++        // In merged logits array, index i maps to global KV position i
++        // (low: 0..n_low-1, high: n_low..n_total-1)
++        if (i > query_pos) {
++            val = -1e30f;
++        }
++        local_max = fmaxf(local_max, val);
++    }
++    // Warp reduce max
++    for (int offset = 16; offset > 0; offset >>= 1) {
++        local_max = fmaxf(local_max, __shfl_down_sync(0xFFFFFFFF, local_max, offset));
++    }
++    __shared__ float warp_maxes[4];
++    const int warp_id = threadIdx.x / 32;
++    const int lane_id = threadIdx.x % 32;
++    if (lane_id == 0) warp_maxes[warp_id] = local_max;
++    __syncthreads();
++    if (threadIdx.x == 0) {
++        float m = warp_maxes[0];
++        m = fmaxf(m, warp_maxes[1]);
++        m = fmaxf(m, warp_maxes[2]);
++        m = fmaxf(m, warp_maxes[3]);
++        warp_maxes[0] = m;  // store global max at [0]
++    }
++    __syncthreads();
++    const float global_max = warp_maxes[0];
++
++    // Phase 2: Compute exp and partial sum
++    float local_sum = 0.0f;
++    for (int64_t i = threadIdx.x; i < n_total; i += blockDim.x) {
++        float val;
++        if (i < n_low) {
++            val = ll[i];
++        } else {
++            val = lh[i - n_low];
++        }
++        int64_t kv_pos = i;  // global KV position
++        if (kv_pos > query_pos) {
++            val = -1e30f;
++        }
++        float e = expf(val - global_max);
++        weights[token * (n_heads * n_total) + head * n_total + i] = e;
++        local_sum += e;
++    }
++    // Warp reduce sum
++    for (int offset = 16; offset > 0; offset >>= 1) {
++        local_sum += __shfl_down_sync(0xFFFFFFFF, local_sum, offset);
++    }
++    __shared__ float warp_sums[4];
++    if (lane_id == 0) warp_sums[warp_id] = local_sum;
++    __syncthreads();
++    if (threadIdx.x == 0) {
++        float total = warp_sums[0] + warp_sums[1] + warp_sums[2] + warp_sums[3];
++        warp_sums[0] = total;  // store total sum at [0]
++    }
++    __syncthreads();
++    const float total_sum = warp_sums[0];
++
++    // Phase 3: Normalize (w_i = exp_i / sum)
++    for (int64_t i = threadIdx.x; i < n_total; i += blockDim.x) {
++        float * w = weights + token * (n_heads * n_total) + head * n_total;
++        w[i] /= (total_sum + 1e-10f);
++    }
++}
++
++// Kernel 3: V weighted accumulation (dequanted V in fp16, weights in fp32)
++// One block per D elements, threads accumulate over KV tokens.
++// Writes output[D, n_heads, n_tokens_q] in FP32.
++static __global__ void k_2pass_V_accumulate(
++        const float * __restrict__ weights,   // [n_kv_slice, n_heads, n_tokens_q]
++        const half  * __restrict__ V_fp16,    // [D, n_kv_slice] (this slice)
++        float       * __restrict__ out,       // [D, n_heads, n_tokens_q] output (accumulated)
++        const int64_t D,
++        const int64_t n_kv_slice,
++        const int64_t n_heads,
++        const int64_t n_tokens_q)
++{
++    const int64_t d     = blockIdx.x;
++    const int64_t head  = blockIdx.y;
++    const int64_t token = blockIdx.z;
++
++    if (d >= D) return;
++
++    float acc = 0.0f;
++    for (int64_t k = threadIdx.x; k < n_kv_slice; k += blockDim.x) {
++        float w = weights[token * (n_heads * n_kv_slice) + head * n_kv_slice + k];
++        float v = __half2float(V_fp16[k * D + d]);
++        acc += w * v;
++    }
++
++    // Warp reduce
++    for (int offset = 16; offset > 0; offset >>= 1) {
++        acc += __shfl_down_sync(0xFFFFFFFF, acc, offset);
++    }
++
++    __shared__ float warp_sums[4];
++    const int warp_id = threadIdx.x / 32;
++    const int lane_id = threadIdx.x % 32;
++    if (lane_id == 0) warp_sums[warp_id] = acc;
++    __syncthreads();
++    if (threadIdx.x == 0) {
++        float final = warp_sums[0] + warp_sums[1] + warp_sums[2] + warp_sums[3];
++        out[token * (n_heads * D) + head * D + d] = final;
++    }
++}
++
++// Kernel 4: Element-wise add (combine out_low + out_high)
++static __global__ void k_2pass_add_vec(
++        const float * __restrict__ a,
++        const float * __restrict__ b,
++        float       * __restrict__ out,
++        const int64_t n)
++{
++    for (int64_t i = blockIdx.x * blockDim.x + threadIdx.x; i < n; i += blockDim.x * gridDim.x) {
++        out[i] = a[i] + b[i];
++    }
++}
++
++// ═══════════════════════════════════════════════════════════════
++// 2-PASS ORCHESTRATION — Main entry point
++// ═══════════════════════════════════════════════════════════════
++static void ggml_cuda_flash_attn_ext_2pass(ggml_backend_cuda_context & ctx, ggml_tensor * dst) {
++    // One-time startup log
++    static const bool _logged = [] {
++        fprintf(stderr, "\033[32m[OMERTA] 2-PASS Pipeline: ENABLED (v1.0-stable-core)\033[0m\n");
++        return true;
++    }();
++    GGML_UNUSED(_logged);
++
++    cudaStream_t stream = ctx.stream();
++
++    const ggml_tensor * Q     = dst->src[0];
++    const ggml_tensor * K     = dst->src[1];
++    const ggml_tensor * V     = dst->src[2];
++
++    const int64_t n_total = K->ne[1];  // total KV tokens
++    const int64_t D       = Q->ne[0];  // head dimension
++    const int64_t n_heads = K->ne[2];  // number of KV heads
++    const int64_t n_tokens_q = Q->ne[1];  // query tokens (decode = 1)
++
++    // Split point
++    static const int recent_window = [] {
++        const char * e = getenv("TURBO_RECENT_WINDOW");
++        return e ? std::max(atoi(e), 1) : 256;
++    }();
++
++    const int64_t n_high = std::min(n_total, (int64_t)recent_window);
++    const int64_t n_low  = n_total - n_high;
++
++    // Scale factor
++    const float scale = 1.0f / sqrtf((float)D);
++
++    // ── Step 1: Dequant K slices to fp16 ──
++    ggml_cuda_pool & pool = ctx.pool();
++
++    const size_t k_low_bytes  = n_low * D * sizeof(half);
++    const size_t k_high_bytes = n_high * D * sizeof(half);
++    ggml_cuda_pool_alloc<half> k_low_fp16(pool, k_low_bytes / sizeof(half));
++    ggml_cuda_pool_alloc<half> k_high_fp16(pool, k_high_bytes / sizeof(half));
++
++    // Dequant K_low (tokens 0..n_low-1)
++    if (K->type == GGML_TYPE_TURBO4_0) {
++        dim3 grid_k(n_low, n_heads, 1);
++        k_turbo4_dequant_f16<<<grid_k, D, 0, stream>>>(
++            (const char *)K->data, k_low_fp16.get(),
++            D, n_low, n_heads, K->nb[1], K->nb[2], K->nb[3]);
++    } else if (K->type == GGML_TYPE_TURBO3_0) {
++        dim3 grid_k(n_low, n_heads, 1);
++        k_turbo3_dequant_f16<<<grid_k, D, 0, stream>>>(
++            (const char *)K->data, k_low_fp16.get(),
++            D, n_low, n_heads, K->nb[1], K->nb[2], K->nb[3]);
++    } else if (K->type == GGML_TYPE_Q8_0) {
++        // q8_0 → fp16 dequant (inline, simple)
++        dim3 grid_k(n_low, n_heads, 1);
++        k_turbo3_dequant_f16<<<grid_k, D, 0, stream>>>(
++            (const char *)K->data, k_low_fp16.get(),
++            D, n_low, n_heads, K->nb[1], K->nb[2], K->nb[3]);
++    } else {
++        GGML_ASSERT(false && "unsupported K type for 2-pass");
++    }
++
++    // Dequant K_high (tokens n_low..n_total-1)
++    const char * k_high_src = (const char *)K->data + n_low * K->nb[1];
++    if (K->type == GGML_TYPE_TURBO4_0) {
++        dim3 grid_k(n_high, n_heads, 1);
++        k_turbo4_dequant_f16<<<grid_k, D, 0, stream>>>(
++            k_high_src, k_high_fp16.get(),
++            D, n_high, n_heads, K->nb[1], K->nb[2], K->nb[3]);
++    } else if (K->type == GGML_TYPE_TURBO3_0) {
++        dim3 grid_k(n_high, n_heads, 1);
++        k_turbo3_dequant_f16<<<grid_k, D, 0, stream>>>(
++            k_high_src, k_high_fp16.get(),
++            D, n_high, n_heads, K->nb[1], K->nb[2], K->nb[3]);
++    } else {
++        dim3 grid_k(n_high, n_heads, 1);
++        k_turbo3_dequant_f16<<<grid_k, D, 0, stream>>>(
++            k_high_src, k_high_fp16.get(),
++            D, n_high, n_heads, K->nb[1], K->nb[2], K->nb[3]);
++    }
++
++    // ── Step 2: KQ passes ──
++    ggml_cuda_pool_alloc<float> logits_low(pool, n_tokens_q * n_heads * n_low);
++    ggml_cuda_pool_alloc<float> logits_high(pool, n_tokens_q * n_heads * n_high);
++
++    const int64_t nb01 = Q->nb[1] / sizeof(float);  // Q stride per token (in floats)
++    const int64_t nb02 = Q->nb[2] / sizeof(float);  // Q stride per head (in floats)
++
++    dim3 grid_kq_low(n_low, n_heads, n_tokens_q);
++    k_2pass_KQ_compute<<<grid_kq_low, 128, 0, stream>>>(
++        (const float *)Q->data, k_low_fp16.get(), logits_low.get(),
++        D, n_low, scale, nb01, nb02);
++
++    dim3 grid_kq_high(n_high, n_heads, n_tokens_q);
++    k_2pass_KQ_compute<<<grid_kq_high, 128, 0, stream>>>(
++        (const float *)Q->data, k_high_fp16.get(), logits_high.get(),
++        D, n_high, scale, nb01, nb02);
++
++    // ── Step 3: Merge + Softmax ──
++    ggml_cuda_pool_alloc<float> weights(pool, n_tokens_q * n_heads * n_total);
++
++    // base_kv: query position in global KV coordinates
++    // For decode (n_tokens_q=1), this is the current write position
++    const int64_t base_kv = n_total - n_tokens_q;
++
++    dim3 grid_ms(n_heads, n_tokens_q);
++    k_2pass_merge_softmax<<<grid_ms, 256, 0, stream>>>(
++        logits_low.get(), logits_high.get(),
++        nullptr,  // automatic causal masking (no external mask tensor)
++        weights.get(), n_low, n_high, n_heads, n_tokens_q, base_kv, 0);
++
++    // ── Step 4: Dequant V slices to fp16 ──
++    const size_t v_low_bytes  = n_low * D * sizeof(half);
++    const size_t v_high_bytes = n_high * D * sizeof(half);
++    ggml_cuda_pool_alloc<half> v_low_fp16(pool, v_low_bytes / sizeof(half));
++    ggml_cuda_pool_alloc<half> v_high_fp16(pool, v_high_bytes / sizeof(half));
++
++    if (V->type == GGML_TYPE_TURBO3_0 || V->type == GGML_TYPE_TURBO4_0) {
++        dim3 grid_v(n_low, n_heads, 1);
++        k_turbo3_dequant_f16<<<grid_v, D, 0, stream>>>(
++            (const char *)V->data, v_low_fp16.get(),
++            D, n_low, n_heads, V->nb[1], V->nb[2], V->nb[3]);
++    } else {
++        dim3 grid_v(n_low, n_heads, 1);
++        k_turbo3_dequant_f16<<<grid_v, D, 0, stream>>>(
++            (const char *)V->data, v_low_fp16.get(),
++            D, n_low, n_heads, V->nb[1], V->nb[2], V->nb[3]);
++    }
++
++    const char * v_high_src = (const char *)V->data + n_low * V->nb[1];
++    if (V->type == GGML_TYPE_TURBO3_0 || V->type == GGML_TYPE_TURBO4_0) {
++        dim3 grid_v(n_high, n_heads, 1);
++        k_turbo3_dequant_f16<<<grid_v, D, 0, stream>>>(
++            v_high_src, v_high_fp16.get(),
++            D, n_high, n_heads, V->nb[1], V->nb[2], V->nb[3]);
++    } else {
++        dim3 grid_v(n_high, n_heads, 1);
++        k_turbo3_dequant_f16<<<grid_v, D, 0, stream>>>(
++            v_high_src, v_high_fp16.get(),
++            D, n_high, n_heads, V->nb[1], V->nb[2], V->nb[3]);
++    }
++
++    // ── Step 5: V accumulation (FP32) ──
++    ggml_cuda_pool_alloc<float> out_low(pool, n_tokens_q * n_heads * D);
++    ggml_cuda_pool_alloc<float> out_high(pool, n_tokens_q * n_heads * D);
++
++    dim3 grid_vacc_low(D, n_heads, n_tokens_q);
++    k_2pass_V_accumulate<<<grid_vacc_low, 128, 0, stream>>>(
++        weights.get(), v_low_fp16.get(), out_low.get(),
++        D, n_low, n_heads, n_tokens_q);
++
++    dim3 grid_vacc_high(D, n_heads, n_tokens_q);
++    k_2pass_V_accumulate<<<grid_vacc_high, 128, 0, stream>>>(
++        weights.get() + n_low, v_high_fp16.get(), out_high.get(),
++        D, n_high, n_heads, n_tokens_q);
++
++    // ── Step 6: Combine (out_low + out_high) ──
++    const int64_t total_elements = n_tokens_q * n_heads * D;
++    float * dst_data = (float *)dst->data;
++
++    const int combine_blocks = (total_elements + 255) / 256;
++    k_2pass_add_vec<<<combine_blocks, 256, 0, stream>>>(
++        out_low.get(), out_high.get(), dst_data, total_elements);
++
++    // RAII cleanup is automatic
++}
++
+ void ggml_cuda_flash_attn_ext(ggml_backend_cuda_context & ctx, ggml_tensor * dst) {
+     ggml_cuda_set_device(ctx.device);
+ 
+@@ -811,6 +1179,14 @@ void ggml_cuda_flash_attn_ext(ggml_backend_cuda_context & ctx, ggml_tensor * dst
+     }();
+     const bool turbo_kv = K->type == GGML_TYPE_TURBO2_0 || K->type == GGML_TYPE_TURBO3_0 || K->type == GGML_TYPE_TURBO4_0 ||
+                           V->type == GGML_TYPE_TURBO2_0 || V->type == GGML_TYPE_TURBO3_0 || V->type == GGML_TYPE_TURBO4_0;
++
++    // 2-PASS split-aware attention: bypass fused kernel for mixed-precision KV
++    static const bool turbo_2pass_split = (getenv("TURBO_2PASS_SPLIT") != nullptr);
++    if (turbo_2pass_split && turbo_kv && Q->ne[1] == 1) {
++        ggml_cuda_flash_attn_ext_2pass(ctx, dst);
++        return;
++    }
++
+     if (turbo_kv && !turbo_prefill_vec && Q->ne[1] > 1 && turing_mma_available(ggml_cuda_info().devices[ggml_cuda_get_device()].cc)) {
+         // Prefill path: turbo4 K uses inverse FWHT dequant (original domain, no Q rotation),
+         // turbo2/3 K uses simple dequant (rotated domain, Q pre-rotated). V un-rotation at graph level.

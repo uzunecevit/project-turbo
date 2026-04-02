@@ -1,0 +1,14 @@
+diff --git a/src/llama-kv-cache.h b/src/llama-kv-cache.h
+index a52ae7c..49d60c4 100644
+--- a/src/llama-kv-cache.h
++++ b/src/llama-kv-cache.h
+@@ -244,6 +244,9 @@ private:
+         int k_low_next_write = 0;  // next write position in k_low archive
+     };
+ 
++    // V dual write: windowed index tensor for v_high (host buffer, created by build_input_v_idxs)
++    mutable ggml_tensor * v_idxs_high_global = nullptr;
++
+     bool v_trans = true;  // the value tensor is transposed
+ 
+     const uint32_t n_seq_max = 1;

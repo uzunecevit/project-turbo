@@ -1,3 +1,0 @@
-[submodule "src/llama-spiritbuun-cuda"]
-	path = src/llama-spiritbuun-cuda
-	url = https://github.com/spiritbuun/llama-cpp-turboquant-cuda.git

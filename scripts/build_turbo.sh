@@ -45,6 +45,20 @@ else
     fi
 fi
 
+# ── Apply OMERTA Patches ────────────────────────────────────────────────────
+PATCH_DIR="${TURBO_ROOT}/patches"
+if [ -d "$PATCH_DIR" ]; then
+    echo "[TURBO] Applying OMERTA patches..."
+    for patch in "$PATCH_DIR"/*.patch; do
+        if [ -f "$patch" ]; then
+            echo "[TURBO]   $(basename "$patch")"
+            git -C "$SRC_DIR" apply --check "$patch" 2>/dev/null && \
+                git -C "$SRC_DIR" apply "$patch" || \
+                echo "[TURBO]   SKIP (already applied or conflict)"
+        fi
+    done
+fi
+
 # ── CMake Configure ─────────────────────────────────────────────────────────
 echo "[TURBO] Configuring CMake..."
 cmake -S "$SRC_DIR" -B "$BUILD_DIR" \

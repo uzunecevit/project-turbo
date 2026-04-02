@@ -1,0 +1,124 @@
+diff --git a/src/llama-kv-cache.cpp b/src/llama-kv-cache.cpp
+index 75d9a29..c38e4fe 100644
+--- a/src/llama-kv-cache.cpp
++++ b/src/llama-kv-cache.cpp
+@@ -66,7 +66,7 @@ llama_kv_cache::llama_kv_cache(
+             const size_t n_turbo_extra = is_turbo ? 8 : 0; // rotation matrices + safety margin
+             // Pool: 4x multiplier for dual buffer support (original k/v + k_low/v_low + k_high/v_high + views)
+             ggml_init_params params = {
+-                /*.mem_size   =*/ size_t((4u*(1 + n_stream)*n_layer_kv + n_turbo_extra)*ggml_tensor_overhead()),
++                /*.mem_size   =*/ size_t((5u*(1 + n_stream)*n_layer_kv + n_turbo_extra)*ggml_tensor_overhead()),
+                 /*.mem_buffer =*/ NULL,
+                 /*.no_alloc   =*/ true,
+             };
+@@ -245,21 +245,22 @@ llama_kv_cache::llama_kv_cache(
+ 
+         const bool enable_dual = is_turbo && (type_k == GGML_TYPE_TURBO4_0 || type_v == GGML_TYPE_TURBO4_0);
+         if (enable_dual) {
+-            // k_low: Turbo3 archive (old context)
+-            k_low = has_k ? ggml_new_tensor_3d(ctx, GGML_TYPE_TURBO3_0, n_embd_k_gqa, kv_size, n_stream) : nullptr;
++            // K: her iki buffer da Turbo4 (reasoning garanti)
++            k_low = has_k ? ggml_new_tensor_3d(ctx, GGML_TYPE_TURBO4_0, n_embd_k_gqa, kv_size, n_stream) : nullptr;
+             v_low = has_v ? ggml_new_tensor_3d(ctx, GGML_TYPE_TURBO3_0, n_embd_v_gqa, kv_size, n_stream) : nullptr;
+             if (k_low) { ggml_format_name(k_low, "cache_k_low_l%d", il); nb11_low = k_low->nb[1]; }
+             if (v_low) { ggml_format_name(v_low, "cache_v_low_l%d", il); nb21_low = v_low->nb[1]; }
+ 
+-            // k_high: Turbo4 recent window (active)
++            // K_high: Turbo4 recent window, V_high: Turbo4 recent window
+             const int window = std::min((int)kv_size, recent_window);
+             k_high = has_k ? ggml_new_tensor_3d(ctx, GGML_TYPE_TURBO4_0, n_embd_k_gqa, window, n_stream) : nullptr;
+             v_high = has_v ? ggml_new_tensor_3d(ctx, GGML_TYPE_TURBO4_0, n_embd_v_gqa, window, n_stream) : nullptr;
+             if (k_high) { ggml_format_name(k_high, "cache_k_high_l%d", il); nb11_high = k_high->nb[1]; }
+             if (v_high) { ggml_format_name(v_high, "cache_v_high_l%d", il); nb21_high = v_high->nb[1]; }
+ 
+-            LLAMA_LOG_INFO("llama_kv_cache: dual buffer layer %d: low=%s high=%s window=%d\n",
+-                il, ggml_type_name(GGML_TYPE_TURBO3_0), ggml_type_name(GGML_TYPE_TURBO4_0), window);
++            LLAMA_LOG_INFO("llama_kv_cache: dual buffer layer %d: K=%s/%s V=%s/%s window=%d\n",
++                il, ggml_type_name(GGML_TYPE_TURBO4_0), ggml_type_name(GGML_TYPE_TURBO4_0),
++                ggml_type_name(GGML_TYPE_TURBO3_0), ggml_type_name(GGML_TYPE_TURBO4_0), window);
+         }
+ 
+         std::vector<ggml_tensor *> k_stream;
+@@ -276,7 +277,7 @@ llama_kv_cache::llama_kv_cache(
+             il, k, v, k_stream, v_stream,
+             k_low, v_low, k_high, v_high,
+             nb11_low, nb11_high, nb21_low, nb21_high,
+-            0,  // k_low_next_write
++            0  // k_low_next_write
+         });
+ 
+         // TurboQuant: create rotation matrix tensors (once, shared across layers)
+@@ -1344,7 +1345,19 @@ ggml_tensor * llama_kv_cache::cpy_v(ggml_context * ctx, ggml_tensor * v_cur, ggm
+             v = ggml_reshape_2d(ctx, v, n_embd_gqa, kv_size*n_stream);
+         }
+ 
+-        return ggml_set_rows(ctx, v, v_cur, v_idxs);
++        ggml_tensor * result = ggml_set_rows(ctx, v, v_cur, v_idxs);
++
++        // V dual write: also write to v_high (Turbo4 window buffer) if enabled
++        if (layers[ikv].v_high && v_idxs_high_global) {
++            const int64_t v_high_window = layers[ikv].v_high->ne[1];
++            ggml_tensor * v_high_buf = layers[ikv].v_high;
++            if (n_stream > 1) {
++                v_high_buf = ggml_reshape_2d(ctx, v_high_buf, n_embd_gqa, v_high_window * n_stream);
++            }
++            ggml_set_rows(ctx, v_high_buf, v_cur, v_idxs_high_global);
++        }
++
++        return result;
+     }
+ 
+     if (ggml_row_size(v_cur->type, n_embd_gqa) == v_cur->nb[2]) {
+@@ -1391,6 +1404,14 @@ ggml_tensor * llama_kv_cache::build_input_v_idxs(ggml_context * ctx, const llama
+ 
+     ggml_set_input(v_idxs);
+ 
++    // V dual write: create windowed index tensor for v_high (host buffer via INPUT flag)
++    // Recreated each build to match current n_tokens
++    if (!layers.empty() && layers[0].v_high) {
++        v_idxs_high_global = ggml_new_tensor_1d(ctx, GGML_TYPE_I64, n_tokens);
++        ggml_set_input(v_idxs_high_global);
++        ggml_format_name(v_idxs_high_global, "v_idxs_high_global");
++    }
++
+     return v_idxs;
+ }
+ 
+@@ -2354,13 +2375,35 @@ bool llama_kv_cache::state_read_data(llama_io_read_i & io, uint32_t strm, uint32
+                         for (uint32_t i = 0; i < cell_count; ++i) {
+                             const size_t dst_offset = (sinfo.idxs[0][i] + j * cells.size()) * v_size_el;
+                             ggml_backend_tensor_set(v, (const char*)src + i * v_size_el, dst_offset, v_size_el);
+-                        }
+-                    }
+                 }
+             }
+         }
+     }
+ 
++    // V dual write: populate v_idxs_high_global (windowed indices for v_high buffers)
++    if (v_idxs_high_global) {
++        // Find the window size from any layer that has v_high
++        int64_t window = 0;
++        for (const auto & layer : layers) {
++            if (layer.v_high) { window = layer.v_high->ne[1]; break; }
++        }
++        if (window > 0) {
++            GGML_ASSERT(ggml_backend_buffer_is_host(v_idxs_high_global->buffer));
++            int64_t * high_data = (int64_t *) v_idxs_high_global->data;
++
++            for (uint32_t s = 0; s < sinfo.n_stream(); ++s) {
++                const int64_t offs = sinfo.strm[s]*get_size();
++
++                for (uint32_t i = 0; i < sinfo.size(); ++i) {
++                    const int64_t global_idx = offs + sinfo.idxs[s][i];
++                    high_data[s*sinfo.size() + i] = global_idx % window;
++                }
++            }
++        }
++    }
++}
++    }
++
+     return true;
+ }
+ 

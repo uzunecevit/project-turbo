@@ -10,14 +10,19 @@ src/turbo/                     # Python package (public API)
   turbo_adapter.py             # High-level adapter + ctypes C bridge bindings
   turbo_bridge.c               # C bridge (avoids ctypes struct-by-value ABI issues)
   enums.py                     # Auto-generated from C headers — DO NOT EDIT MANUALLY
-src/llama-spiritbuun-cuda/     # llama.cpp fork (git submodule, spiritbuun/llama-cpp-turboquant-cuda)
+patches/                       # OMERTA patches (applied to spiritbuun fork during build)
+  001-fattn-2pass.patch        # 2-PASS attention de-fusion (4 CUDA kernels)
+  002-kv-cache-dual-write.patch # V dual write (Turbo3 + Turbo4)
+  003-kv-cache-header.patch    # Dual buffer struct (v_idxs_high_global)
 scripts/
-  build_turbo.sh               # Full build script (CMake + CUDA + C bridge compile)
+  build_turbo.sh               # Clone fork + apply patches + CMake + CUDA build
   extract_enums.py             # Generates src/turbo/enums.py from ggml.h
 tests/                         # All tests (no pytest fixtures, run as scripts or via pytest)
 examples/                      # Usage examples
 build/                         # Build artifacts (libllama.so, turbo_bridge.so, etc.)
 ```
+
+**Note:** `src/llama-spiritbuun-cuda/` is no longer a submodule. The build script clones the spiritbuun fork and applies OMERTA patches automatically.
 
 ## Build Commands
 
