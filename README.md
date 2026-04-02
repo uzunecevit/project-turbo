@@ -18,7 +18,7 @@ ctx.bridge.free()
 
 ## v1.0 — OMERTA Stable Core
 
-> **2-PASS Attention De-Fusion + Asymmetric V Split**
+> **2-PASS Attention De-Fusion + Asymmetric V Split — STABLE PRODUCTION RELEASE**
 
 | Feature | Açıklama |
 |---|---|
