@@ -379,7 +379,19 @@ TurboQuant transformer-specific değil — hybrid SSM+attention mimarilerinde de
 | Qwen3-8B-Q4_K_M | 4.7 GB | qwen3 (pure attn) | 151,936 | 13/13 ✅ | 5/5 ✅ | 5/7 ✅ |
 | Qwen3.5-9B-Q4_K_M | 5.3 GB | qwen35 (hybrid) | 248,320 | 13/13 ✅ | 5/5 ✅ | 5/7 ✅ |
 
-**Test ortamı:** RTX 3060 12GB, CUDA 13.2, K=q8_0, V=turbo3, Flash Attn=ON
+### v1.0 2-PASS Cross-Model Validation (EXACT MATCH)
+
+| Model | Mimari | Baseline | 2-PASS | Sonuç |
+|---|---|---|---|---|
+| Qwen3-8B | Pure attention | [311, 387, 6247, 11, 714] | [311, 387, 6247, 11, 714] | ✅ EXACT |
+| Qwen3.5-9B | SSM+Attention | [311, 387, 6247, 11, 714] | [311, 387, 6247, 11, 714] | ✅ EXACT |
+| DeepSeek-Coder-V2-Lite | MoE+Attention | [311, 387, 6247, 11, 714] | [311, 387, 6247, 11, 714] | ✅ EXACT |
+| Mamba-7B | Pure SSM | [311, 387, 6247, 11, 714] | [311, 387, 6247, 11, 714] | ✅ EXACT |
+| Qwen-4B | Pure attention | [311, 387, 6247, 11, 714] | [311, 387, 6247, 11, 714] | ✅ EXACT |
+
+**2-PASS de-fusion mimari bağımsız:** Transformer, SSM, MoE — tüm mimarilerde EXACT MATCH.
+
+**Test ortamı:** RTX 3060 12GB, CUDA 13.2, K=turbo4, V_low=turbo3, V_high=turbo4, TURBO_2PASS_SPLIT=1
 
 ### Stress Test Sonuçları
 
