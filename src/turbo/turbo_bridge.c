@@ -275,3 +275,191 @@ void turbo_free(void) {
 void turbo_kv_cache_clear(void) {
     turbo_ctx_kv_cache_clear(g_handle);
 }
+
+/* ═══════════════════════════════════════════════════════════════════════════════
+ * Chat template — read from GGUF metadata + apply with auto-detect
+ * ═══════════════════════════════════════════════════════════════════════════════ */
+
+const char *turbo_ctx_get_chat_template(const turbo_handle_t *h) {
+    if (!g_model) return NULL;
+    return llama_model_chat_template(g_model, NULL);
+}
+
+int32_t turbo_ctx_apply_chat_template(
+        const turbo_handle_t *h,
+        const char *tmpl,
+        const char **roles,
+        const char **contents,
+        int n_msg,
+        bool add_ass,
+        char *buf,
+        int32_t buf_size)
+{
+    if (!h || !h->vocab) return -1;
+
+    /* If tmpl is NULL, try to read from GGUF metadata first */
+    const char *effective_tmpl = tmpl;
+    if (!effective_tmpl) {
+        effective_tmpl = turbo_ctx_get_chat_template(h);
+    }
+
+    /* Build llama_chat_message array on the stack */
+    struct llama_chat_message *msgs = (struct llama_chat_message *)
+        malloc(n_msg * sizeof(struct llama_chat_message));
+    if (!msgs) return -1;
+
+    for (int i = 0; i < n_msg; i++) {
+        msgs[i].role    = roles[i];
+        msgs[i].content = contents[i];
+    }
+
+    int32_t result = llama_chat_apply_template(effective_tmpl, msgs, n_msg, add_ass, buf, buf_size);
+    free(msgs);
+    return result;
+}
+
+/* ═══════════════════════════════════════════════════════════════════════════════
+ * Sampler chain — proper sampling for instruct models
+ *
+ * CORRECT ORDER: temp → top_k → top_p → min_p → dist
+ * Each sampler transforms logits in sequence. Temperature must come first
+ * to scale the distribution, then filtering samplers prune, then dist
+ * performs the final random selection.
+ * ═══════════════════════════════════════════════════════════════════════════════ */
+
+/* Forward declaration */
+struct llama_sampler *turbo_sampler_init_full(int top_k, float top_p, float min_p,
+                                               float temp, uint32_t seed,
+                                               int32_t penalty_last_n,
+                                               float penalty_repeat,
+                                               float penalty_freq,
+                                               float penalty_present);
+
+struct llama_sampler *turbo_sampler_init(int top_k, float top_p, float min_p,
+                                          float temp, uint32_t seed)
+{
+    return turbo_sampler_init_full(top_k, top_p, min_p, temp, seed,
+                                   0, 1.0f, 0.0f, 0.0f);
+}
+
+struct llama_sampler *turbo_sampler_init_full(int top_k, float top_p, float min_p,
+                                               float temp, uint32_t seed,
+                                               int32_t penalty_last_n,
+                                               float penalty_repeat,
+                                               float penalty_freq,
+                                               float penalty_present)
+{
+    struct llama_sampler_chain_params sparams = llama_sampler_chain_default_params();
+    struct llama_sampler *chain = llama_sampler_chain_init(sparams);
+    if (!chain) return NULL;
+
+    /* 1. Temperature — scale logits first */
+    if (temp > 0.0f) {
+        llama_sampler_chain_add(chain, llama_sampler_init_temp(temp));
+    }
+    /* 2. Top-K — keep only top K tokens */
+    if (top_k > 0) {
+        llama_sampler_chain_add(chain, llama_sampler_init_top_k(top_k));
+    }
+    /* 3. Top-P (nucleus) — cumulative probability cutoff */
+    if (top_p < 1.0f) {
+        llama_sampler_chain_add(chain, llama_sampler_init_top_p(top_p, 1));
+    }
+    /* 4. Min-P — relative probability threshold */
+    if (min_p > 0.0f) {
+        llama_sampler_chain_add(chain, llama_sampler_init_min_p(min_p, 1));
+    }
+    /* 5. Penalties — AFTER filtering, applied to reduced token set */
+    if (penalty_last_n != 0 && (penalty_repeat != 1.0f || penalty_freq != 0.0f || penalty_present != 0.0f)) {
+        llama_sampler_chain_add(chain, llama_sampler_init_penalties(
+            penalty_last_n, penalty_repeat, penalty_freq, penalty_present));
+    }
+    /* 6. Distribution — final random token selection */
+    llama_sampler_chain_add(chain, llama_sampler_init_dist(seed));
+
+    return chain;
+}
+
+int turbo_ctx_sampler_sample(struct llama_sampler *sampler,
+                              const turbo_handle_t *h)
+{
+    if (!sampler || !h || !h->ctx) return -1;
+    /* Use llama_get_logits_ith to verify logits are available */
+    const float *logits = llama_get_logits(h->ctx);
+    if (!logits) return -1;
+    int token = llama_sampler_sample(sampler, h->ctx, -1);
+    /* Clamp to valid range — sampler may return -1 on error */
+    int n_vocab = llama_vocab_n_tokens(h->vocab);
+    if (token < 0 || token >= n_vocab) return -1;
+    return token;
+}
+
+void turbo_sampler_free(struct llama_sampler *sampler) {
+    if (sampler) {
+        llama_sampler_free(sampler);
+    }
+}
+
+/* ═══════════════════════════════════════════════════════════════════════════════
+ * Legacy handle accessor — get the global handle for legacy API users
+ * ═══════════════════════════════════════════════════════════════════════════════ */
+
+turbo_handle_t *turbo_get_global_handle(void) {
+    return g_handle;
+}
+
+/* ═══════════════════════════════════════════════════════════════════════════════
+ * Legacy cleanup — destroy global context + model (for re-init with different config)
+ * ═══════════════════════════════════════════════════════════════════════════════ */
+
+void turbo_legacy_cleanup(void) {
+    if (g_handle) {
+        turbo_ctx_free(g_handle);
+        g_handle = NULL;
+    }
+    if (g_model) {
+        llama_model_free(g_model);
+        g_model = NULL;
+    }
+    llama_backend_free();
+    g_next_id = 0;
+}
+
+/* ═══════════════════════════════════════════════════════════════════════════════
+ * Model info — read metadata for KV dependency analysis
+ * ═══════════════════════════════════════════════════════════════════════════════ */
+
+int turbo_model_n_layer(void) {
+    if (!g_model) return -1;
+    return llama_model_n_layer(g_model);
+}
+
+int turbo_model_n_head(void) {
+    if (!g_model) return -1;
+    return llama_model_n_head(g_model);
+}
+
+int turbo_model_n_head_kv(void) {
+    if (!g_model) return -1;
+    return llama_model_n_head_kv(g_model);
+}
+
+int turbo_model_n_embd(void) {
+    if (!g_model) return -1;
+    return llama_model_n_embd(g_model);
+}
+
+int turbo_model_n_ctx_train(void) {
+    if (!g_model) return -1;
+    return llama_model_n_ctx_train(g_model);
+}
+
+int turbo_model_desc(char *buf, int buf_size) {
+    if (!g_model || !buf || buf_size <= 0) return -1;
+    return llama_model_desc(g_model, buf, (size_t)buf_size);
+}
+
+int turbo_model_meta_val_str(const char *key, char *buf, int buf_size) {
+    if (!g_model || !buf || buf_size <= 0) return -1;
+    return llama_model_meta_val_str(g_model, key, buf, (size_t)buf_size);
+}

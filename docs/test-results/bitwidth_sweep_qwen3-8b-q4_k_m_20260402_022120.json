@@ -1,0 +1,83 @@
+{
+  "q8_0/q8_0": {
+    "prefill_ms": 77.9,
+    "prefill_tps": 629.0,
+    "decode_tps": 34.9,
+    "key_repetition": {
+      "correct": false,
+      "got": null
+    },
+    "reasoning": {
+      "correct": true,
+      "got": 75.0
+    }
+  },
+  "q8_0/turbo3": {
+    "prefill_ms": 16.4,
+    "prefill_tps": 2980.0,
+    "decode_tps": 32.3,
+    "key_repetition": {
+      "correct": false,
+      "got": null
+    },
+    "reasoning": {
+      "correct": false,
+      "got": 1.0
+    },
+    "ab_quality": {
+      "seq_similarity": 0.352,
+      "word_overlap": 0.49
+    }
+  },
+  "q8_0/turbo4": {
+    "prefill_ms": 12.6,
+    "prefill_tps": 3881.0,
+    "decode_tps": 33.1,
+    "key_repetition": {
+      "correct": false,
+      "got": null
+    },
+    "reasoning": {
+      "correct": true,
+      "got": 75.0
+    },
+    "ab_quality": {
+      "seq_similarity": 0.889,
+      "word_overlap": 0.786
+    }
+  },
+  "turbo4/turbo4": {
+    "prefill_ms": 12.9,
+    "prefill_tps": 3786.0,
+    "decode_tps": 31.9,
+    "key_repetition": {
+      "correct": false,
+      "got": 72.0
+    },
+    "reasoning": {
+      "correct": true,
+      "got": 75.0
+    },
+    "ab_quality": {
+      "seq_similarity": 0.403,
+      "word_overlap": 0.383
+    }
+  },
+  "turbo3/turbo3": {
+    "prefill_ms": 14.2,
+    "prefill_tps": 3454.0,
+    "decode_tps": 29.9,
+    "key_repetition": {
+      "correct": false,
+      "got": null
+    },
+    "reasoning": {
+      "correct": false,
+      "got": 1.0
+    },
+    "ab_quality": {
+      "seq_similarity": 0.187,
+      "word_overlap": 0.333
+    }
+  }
+}

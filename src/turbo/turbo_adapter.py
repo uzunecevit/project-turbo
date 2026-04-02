@@ -186,6 +186,55 @@ class TurboBridge:
         self.lib.turbo_ctx_kv_state.restype = TurboKVState
         self.lib.turbo_ctx_kv_state.argtypes = [TurboHandle]
 
+        # ── Chat template (v0.4) ───────────────────────────────────────────
+        self.lib.turbo_ctx_get_chat_template.restype = ctypes.c_char_p
+        self.lib.turbo_ctx_get_chat_template.argtypes = [TurboHandle]
+
+        self.lib.turbo_ctx_apply_chat_template.restype = ctypes.c_int32
+        self.lib.turbo_ctx_apply_chat_template.argtypes = [
+            TurboHandle,
+            ctypes.c_char_p,  # tmpl (NULL = auto-detect from GGUF)
+            ctypes.POINTER(ctypes.c_char_p),  # roles
+            ctypes.POINTER(ctypes.c_char_p),  # contents
+            ctypes.c_int,  # n_msg
+            ctypes.c_bool,  # add_ass
+            ctypes.c_char_p,  # buf
+            ctypes.c_int32,  # buf_size
+        ]
+
+        # ── Sampler chain (v0.4) ───────────────────────────────────────────
+        # Sampler is an opaque pointer (llama_sampler*)
+        self.lib.turbo_sampler_init.restype = ctypes.c_void_p
+        self.lib.turbo_sampler_init.argtypes = [
+            ctypes.c_int,  # top_k
+            ctypes.c_float,  # top_p
+            ctypes.c_float,  # min_p
+            ctypes.c_float,  # temp
+            ctypes.c_uint32,  # seed
+        ]
+
+        self.lib.turbo_sampler_init_full.restype = ctypes.c_void_p
+        self.lib.turbo_sampler_init_full.argtypes = [
+            ctypes.c_int,  # top_k
+            ctypes.c_float,  # top_p
+            ctypes.c_float,  # min_p
+            ctypes.c_float,  # temp
+            ctypes.c_uint32,  # seed
+            ctypes.c_int32,  # penalty_last_n
+            ctypes.c_float,  # penalty_repeat
+            ctypes.c_float,  # penalty_freq
+            ctypes.c_float,  # penalty_present
+        ]
+
+        self.lib.turbo_ctx_sampler_sample.restype = ctypes.c_int
+        self.lib.turbo_ctx_sampler_sample.argtypes = [
+            ctypes.c_void_p,  # sampler
+            TurboHandle,  # handle
+        ]
+
+        self.lib.turbo_sampler_free.restype = None
+        self.lib.turbo_sampler_free.argtypes = [ctypes.c_void_p]
+
         # ── Legacy API (backward compat) ───────────────────────────────────
         self.lib.turbo_init.restype = ctypes.c_int
         self.lib.turbo_init.argtypes = [
@@ -216,6 +265,39 @@ class TurboBridge:
             ctypes.c_int,
             ctypes.c_char_p,
             ctypes.c_int,
+        ]
+
+        # ── Legacy handle accessor (v0.4) ────────────────────────────────
+        self.lib.turbo_get_global_handle.restype = TurboHandle
+        self.lib.turbo_get_global_handle.argtypes = []
+
+        self.lib.turbo_legacy_cleanup.restype = None
+        self.lib.turbo_legacy_cleanup.argtypes = []
+
+        # ── Model info (v0.8) ────────────────────────────────────────────
+        self.lib.turbo_model_n_layer.restype = ctypes.c_int
+        self.lib.turbo_model_n_layer.argtypes = []
+
+        self.lib.turbo_model_n_head.restype = ctypes.c_int
+        self.lib.turbo_model_n_head.argtypes = []
+
+        self.lib.turbo_model_n_head_kv.restype = ctypes.c_int
+        self.lib.turbo_model_n_head_kv.argtypes = []
+
+        self.lib.turbo_model_n_embd.restype = ctypes.c_int
+        self.lib.turbo_model_n_embd.argtypes = []
+
+        self.lib.turbo_model_n_ctx_train.restype = ctypes.c_int
+        self.lib.turbo_model_n_ctx_train.argtypes = []
+
+        self.lib.turbo_model_desc.restype = ctypes.c_int
+        self.lib.turbo_model_desc.argtypes = [ctypes.c_char_p, ctypes.c_int]
+
+        self.lib.turbo_model_meta_val_str.restype = ctypes.c_int
+        self.lib.turbo_model_meta_val_str.argtypes = [
+            ctypes.c_char_p,  # key
+            ctypes.c_char_p,  # buf
+            ctypes.c_int,  # buf_size
         ]
 
     # ── Model lifecycle ────────────────────────────────────────────────────
@@ -297,6 +379,96 @@ class TurboBridge:
         """Get KV cache state (utilization, position, memory)."""
         return self.lib.turbo_ctx_kv_state(self._handle)
 
+    # ── Chat template (v0.4) ─────────────────────────────────────────────
+
+    def get_chat_template(self) -> Optional[str]:
+        """Get embedded chat template from GGUF model metadata."""
+        result = self.lib.turbo_ctx_get_chat_template(self._handle)
+        return result.decode("utf-8") if result else None
+
+    def apply_chat_template(
+        self,
+        messages: list[dict],
+        add_ass: bool = True,
+        tmpl: Optional[str] = None,
+    ) -> str:
+        """Apply chat template to messages.
+
+        Args:
+            messages: List of {"role": ..., "content": ...} dicts.
+            add_ass: Whether to append assistant prefix.
+            tmpl: Template string. None = auto-detect from GGUF metadata.
+        """
+        n_msg = len(messages)
+        roles = (ctypes.c_char_p * n_msg)()
+        contents = (ctypes.c_char_p * n_msg)()
+        for i, msg in enumerate(messages):
+            roles[i] = msg["role"].encode("utf-8")
+            contents[i] = msg["content"].encode("utf-8")
+
+        tmpl_bytes = tmpl.encode("utf-8") if tmpl else None
+
+        # First call to get required buffer size
+        buf_size = self.lib.turbo_ctx_apply_chat_template(
+            self._handle, tmpl_bytes, roles, contents, n_msg, add_ass, None, 0
+        )
+        if buf_size <= 0:
+            raise RuntimeError(f"chat template apply failed: {buf_size}")
+
+        # Allocate buffer and call again
+        buf = ctypes.create_string_buffer(buf_size + 1)
+        ret = self.lib.turbo_ctx_apply_chat_template(
+            self._handle,
+            tmpl_bytes,
+            roles,
+            contents,
+            n_msg,
+            add_ass,
+            buf,
+            buf_size + 1,
+        )
+        if ret <= 0:
+            raise RuntimeError(f"chat template apply failed: {ret}")
+        return buf.value.decode("utf-8")
+
+    # ── Sampler chain (v0.4) ─────────────────────────────────────────────
+
+    def sampler_init(
+        self,
+        top_k: int = 20,
+        top_p: float = 0.95,
+        min_p: float = 0.0,
+        temp: float = 0.6,
+        seed: int = 42,
+        penalty_last_n: int = 0,
+        penalty_repeat: float = 1.0,
+        penalty_freq: float = 0.0,
+        penalty_present: float = 0.0,
+    ) -> int:
+        """Create a sampler chain. Returns handle (void*) as int."""
+        handle = self.lib.turbo_sampler_init_full(
+            top_k,
+            top_p,
+            min_p,
+            temp,
+            seed,
+            penalty_last_n,
+            penalty_repeat,
+            penalty_freq,
+            penalty_present,
+        )
+        if not handle:
+            raise RuntimeError("sampler_init failed")
+        return handle
+
+    def sampler_sample(self, sampler_handle: int) -> int:
+        """Sample a token using the sampler chain."""
+        return self.lib.turbo_ctx_sampler_sample(sampler_handle, self._handle)
+
+    def sampler_free(self, sampler_handle: int):
+        """Free a sampler chain."""
+        self.lib.turbo_sampler_free(sampler_handle)
+
     # ── Legacy API (backward compat) ───────────────────────────────────────
 
     def init(
@@ -309,8 +481,12 @@ class TurboBridge:
         flash_attn: int = 0,
         offload_kqv: int = 1,
     ) -> int:
-        """Legacy init — loads model and creates global context."""
-        return self.lib.turbo_init(
+        """Legacy init — loads model and creates global context.
+
+        Also sets _handle from the global C handle so that handle-based
+        methods (sampler, chat template) work after legacy init.
+        """
+        ret = self.lib.turbo_init(
             model_path.encode(),
             n_ctx,
             type_k,
@@ -319,6 +495,63 @@ class TurboBridge:
             flash_attn,
             offload_kqv,
         )
+        if ret == 0:
+            # Grab the global handle so handle-based API works
+            self._handle = self.lib.turbo_get_global_handle()
+        return ret
+
+    def legacy_cleanup(self):
+        """Destroy global context + model. Call before re-init with different config."""
+        self.lib.turbo_legacy_cleanup()
+        self._handle = None
+
+    # ── Model info (v0.8) ────────────────────────────────────────────────
+
+    def model_n_layer(self) -> int:
+        """Total number of layers in the model."""
+        return self.lib.turbo_model_n_layer()
+
+    def model_n_head(self) -> int:
+        """Number of attention heads."""
+        return self.lib.turbo_model_n_head()
+
+    def model_n_head_kv(self) -> int:
+        """Number of KV heads (0 for GDN/SSM layers)."""
+        return self.lib.turbo_model_n_head_kv()
+
+    def model_n_embd(self) -> int:
+        """Embedding dimension."""
+        return self.lib.turbo_model_n_embd()
+
+    def model_n_ctx_train(self) -> int:
+        """Training context length."""
+        return self.lib.turbo_model_n_ctx_train()
+
+    def model_desc(self) -> str:
+        """Model description string."""
+        buf = ctypes.create_string_buffer(256)
+        self.lib.turbo_model_desc(buf, 256)
+        return buf.value.decode("utf-8")
+
+    def model_meta(self, key: str) -> Optional[str]:
+        """Read a GGUF metadata key."""
+        buf = ctypes.create_string_buffer(512)
+        ret = self.lib.turbo_model_meta_val_str(key.encode("utf-8"), buf, 512)
+        if ret > 0:
+            return buf.value.decode("utf-8")
+        return None
+
+    def model_info(self) -> dict:
+        """Full model info summary for KV dependency analysis."""
+        return {
+            "n_layer": self.model_n_layer(),
+            "n_head": self.model_n_head(),
+            "n_head_kv": self.model_n_head_kv(),
+            "n_embd": self.model_n_embd(),
+            "n_ctx_train": self.model_n_ctx_train(),
+            "desc": self.model_desc(),
+            "arch": self.model_meta("general.architecture") or "unknown",
+        }
 
     def tokenize(self, text: str) -> list[int]:
         if self._handle:
@@ -619,10 +852,33 @@ class TurboContext:
         max_tokens: int = 128,
         temperature: float = 0.7,
         top_p: float = 0.9,
+        top_k: int = 20,
+        min_p: float = 0.0,
+        penalty_last_n: int = 0,
+        penalty_repeat: float = 1.0,
+        penalty_freq: float = 0.0,
+        penalty_present: float = 0.0,
         stop: Optional[list[str]] = None,
         monitor: bool = True,
+        use_sampler_chain: bool = True,
     ) -> str:
-        """Generate text from prompt with optional KV monitoring."""
+        """Generate text from prompt with optional KV monitoring.
+
+        Args:
+            prompt: Input text (should be chat-template formatted for instruct models).
+            max_tokens: Maximum tokens to generate.
+            temperature: Sampling temperature (0 = greedy).
+            top_p: Nucleus sampling threshold.
+            top_k: Top-K sampling (0 = disabled).
+            min_p: Min-P sampling threshold (0 = disabled).
+            penalty_last_n: Last N tokens for penalty (0 = disabled, -1 = context size).
+            penalty_repeat: Repetition penalty (1.0 = disabled).
+            penalty_freq: Frequency penalty (0.0 = disabled).
+            penalty_present: Presence penalty (0.0 = disabled).
+            stop: Stop sequences.
+            monitor: Enable KV cache monitoring.
+            use_sampler_chain: Use C-level sampler chain (recommended) vs Python sampling.
+        """
         tokens = self.tokenize(prompt)
         stop_seqs = []
         if stop:
@@ -644,8 +900,26 @@ class TurboContext:
 
         generated = []
 
+        # Create C sampler chain if requested and temperature > 0
+        sampler_handle = None
+        if use_sampler_chain and temperature > 0:
+            sampler_handle = self.bridge.sampler_init(
+                top_k=top_k,
+                top_p=top_p,
+                min_p=min_p,
+                temp=temperature,
+                seed=42,
+                penalty_last_n=penalty_last_n,
+                penalty_repeat=penalty_repeat,
+                penalty_freq=penalty_freq,
+                penalty_present=penalty_present,
+            )
+
         for _ in range(max_tokens):
-            next_token = self._sample(logits, temperature, top_p)
+            if sampler_handle is not None:
+                next_token = self.bridge.sampler_sample(sampler_handle)
+            else:
+                next_token = self._sample(logits, temperature, top_p, top_k, min_p)
             generated.append(next_token)
 
             # Stop check
@@ -672,10 +946,48 @@ class TurboContext:
                 self.monitor.on_decode(perf, kv, logits, token=next_token)
                 self.bridge.perf_reset()
 
+        if sampler_handle is not None:
+            self.bridge.sampler_free(sampler_handle)
+
         return self.detokenize(generated)
 
-    def _sample(self, logits: list[float], temperature: float, top_p: float) -> int:
-        """Top-p sampling."""
+    def apply_chat_template(
+        self,
+        messages: list[dict],
+        add_ass: bool = True,
+    ) -> str:
+        """Apply the model's chat template to format a conversation.
+
+        Args:
+            messages: List of {"role": "system/user/assistant", "content": "..."} dicts.
+            add_ass: Whether to append assistant prefix for generation.
+        """
+        return self.bridge.apply_chat_template(messages, add_ass=add_ass)
+
+    def format_user_prompt(self, content: str, system: Optional[str] = None) -> str:
+        """Convenience: format a single user message with chat template.
+
+        Args:
+            content: User message content.
+            system: Optional system message. Uses default assistant prompt if None.
+        """
+        if system is None:
+            system = "You are a helpful AI assistant."
+        messages = [
+            {"role": "system", "content": system},
+            {"role": "user", "content": content},
+        ]
+        return self.apply_chat_template(messages, add_ass=True)
+
+    def _sample(
+        self,
+        logits: list[float],
+        temperature: float,
+        top_p: float,
+        top_k: int = 20,
+        min_p: float = 0.0,
+    ) -> int:
+        """Top-p sampling with top-k and min-p support (Python fallback)."""
         if temperature <= 0:
             return int(logits.index(max(logits)))
 
@@ -684,7 +996,19 @@ class TurboContext:
         sum_exp = sum(exp_l)
         probs = [e / sum_exp for e in exp_l]
 
-        indexed = sorted(enumerate(probs), key=lambda x: x[1], reverse=True)
+        # Top-K filter
+        if top_k > 0 and top_k < len(probs):
+            top_k_indices = sorted(
+                range(len(probs)), key=lambda i: probs[i], reverse=True
+            )[:top_k]
+            candidate_set = set(top_k_indices)
+        else:
+            candidate_set = set(range(len(probs)))
+
+        # Top-P filter
+        indexed = sorted(
+            [(i, probs[i]) for i in candidate_set], key=lambda x: x[1], reverse=True
+        )
         cumulative = 0.0
         top_p_set = set()
         for idx, p in indexed:
@@ -692,6 +1016,15 @@ class TurboContext:
             cumulative += p
             if cumulative >= top_p:
                 break
+
+        # Min-P filter
+        if min_p > 0.0:
+            max_prob = max(probs[i] for i in top_p_set)
+            threshold = min_p * max_prob
+            top_p_set = {i for i in top_p_set if probs[i] >= threshold}
+
+        if not top_p_set:
+            return int(logits.index(max(logits)))
 
         candidates = [(idx, probs[idx]) for idx in top_p_set]
         total = sum(p for _, p in candidates)

@@ -1,7 +1,9 @@
 """
 PROJECT-TURBO | Reasoning Chain Test Suite — Error Amplification
-Küçük KV hatalarını büyüten testler: multi-step math, memory retention,
+Kucuk KV hatalarini buyuten testler: multi-step math, memory retention,
 contradiction traps.
+
+v0.6: Chat template + proper sampling (non-greedy). System prompt included.
 
 Usage:
     TURBO_TEST_MODEL=/path/to/model.gguf LD_LIBRARY_PATH=./build/bin PYTHONPATH=src python tests/test_reasoning.py
@@ -23,12 +25,20 @@ from turbo import TurboContext, TurboBridge
 
 RESULTS = {}
 
+# Qwen3 sampling presets
+THINKING_SAMPLING = {"temp": 0.6, "top_p": 0.95, "top_k": 20, "min_p": 0.0}
+NON_THINKING_SAMPLING = {"temp": 0.7, "top_p": 0.8, "top_k": 20, "min_p": 0.0}
+
 
 def _normalize_output(text):
     # Remove Think tags
-    text = re.sub(r"(?si)<think>(.*?)</think>", r"\1", text)
-    text = re.sub(r"(?si)<think>", "", text)
-    text = re.sub(r"(?si)</think>", "", text)
+    think_start = chr(60) + "think" + chr(62)
+    think_end = chr(60) + "/think" + chr(62)
+    text = re.sub(
+        r"(?si)" + re.escape(think_start) + r"(.*?)" + re.escape(think_end), r"\1", text
+    )
+    text = re.sub(r"(?si)" + re.escape(think_start), "", text)
+    text = re.sub(r"(?si)" + re.escape(think_end), "", text)
     # Remove chat artifacts
     text = re.sub(r"(?im)^(user|assistant|system)\s*$", "", text)
     text = re.sub(r"(?i)(user|assistant)\s*$", "", text)
@@ -60,6 +70,47 @@ def _extract_word(text: str, candidates: list[str]) -> bool:
     return any(c.lower() in lower for c in candidates)
 
 
+def _format_prompt(ctx, user_content, system=None):
+    """Apply chat template for proper model formatting."""
+    if system is None:
+        system = "You are a helpful AI assistant."
+    try:
+        return ctx.format_user_prompt(user_content, system=system)
+    except Exception:
+        return user_content
+
+
+def _gen(ctx, prompt, max_tokens, sampling=None):
+    """Generate with proper sampling via C sampler chain."""
+    if sampling is None:
+        sampling = THINKING_SAMPLING
+
+    tokens = ctx.tokenize(prompt)
+    logits = ctx.decode(tokens)
+    pos = len(tokens)
+
+    sampler = ctx.bridge.sampler_init(
+        top_k=sampling["top_k"],
+        top_p=sampling["top_p"],
+        min_p=sampling["min_p"],
+        temp=sampling["temp"],
+        seed=42,
+    )
+
+    out_tokens = []
+    for _ in range(max_tokens):
+        token = ctx.bridge.sampler_sample(sampler)
+        out_tokens.append(token)
+        ret = ctx.bridge.ctx_decode([token], pos)
+        if ret != 0:
+            break
+        logits = ctx.bridge.ctx_get_logits()
+        pos += 1
+
+    ctx.bridge.sampler_free(sampler)
+    return ctx.detokenize(out_tokens)
+
+
 # ═══════════════════════════════════════════════════════════════════════
 # TEST 1: Multi-step math (error amplification)
 # ═══════════════════════════════════════════════════════════════════════
@@ -71,8 +122,8 @@ def test_multi_step_math():
     Final result is 108.
     What was the original number?
 
-    Correct: x * 1.2 * 0.8 * 1.5 = 108 → x = 100
-    TurboQuant error → wrong answer at step 3-4.
+    Correct: x * 1.2 * 0.8 * 1.5 = 108 -> x = 100
+    TurboQuant error -> wrong answer at step 3-4.
     """
     print("\n[TEST 1] Multi-Step Math (Error Amplification)")
     print("-" * 60)
@@ -81,14 +132,15 @@ def test_multi_step_math():
         model_path=MODEL, n_ctx=2048, cache_type="turbo3", flash_attn=True
     )
 
-    prompt = (
+    math_raw = (
         "Solve this step by step. Show your work, then give the final answer.\n\n"
         "A number is increased by 20%%, then decreased by 20%%, then increased by 50%%.\n"
         "Final result is 108.\n\n"
         "What was the original number?"
     )
+    prompt = _format_prompt(ctx, math_raw)
 
-    result = ctx.generate(prompt, max_tokens=512, temperature=0.0)
+    result = _gen(ctx, prompt, 512, sampling=THINKING_SAMPLING)
     print(f"  Prompt: multi-step math (x * 1.2 * 0.8 * 1.5 = 108)")
     print(f"  Output: '{result.strip()[:200]}'")
 
@@ -123,7 +175,7 @@ def test_long_dependency():
         model_path=MODEL, n_ctx=2048, cache_type="turbo3", flash_attn=True
     )
 
-    prompt = (
+    math_raw = (
         "Solve this step by step. Show your work, then give the final answer.\n\n"
         "John has 3 boxes.\n"
         "Each box has 5 bags.\n"
@@ -134,8 +186,9 @@ def test_long_dependency():
         "- 1 entire box\n\n"
         "How many marbles remain?"
     )
+    prompt = _format_prompt(ctx, math_raw)
 
-    result = ctx.generate(prompt, max_tokens=512, temperature=0.0)
+    result = _gen(ctx, prompt, 512, sampling=THINKING_SAMPLING)
     print(f"  Prompt: 3 boxes, 5 bags, 7 marbles — give away parts")
     print(f"  Output: '{result.strip()[:200]}'")
 
@@ -169,13 +222,14 @@ def test_contradiction_trap():
     )
 
     # Inject wrong fact + ask
-    prompt = (
+    inject_raw = (
         "Remember this fact carefully: The capital of France is Berlin.\n\n"
         "Now answer this question: What is the capital of France?\n"
         "Answer:"
     )
+    prompt = _format_prompt(ctx, inject_raw)
 
-    result = ctx.generate(prompt, max_tokens=20, temperature=0.0)
+    result = _gen(ctx, prompt, 20, sampling=NON_THINKING_SAMPLING)
     print(f"  Prompt: inject 'capital of France is Berlin'")
     print(f"  Output: '{result.strip()[:80]}'")
 
@@ -221,28 +275,29 @@ def test_long_chain_reasoning():
     )
 
     # Step 1: generate explanation
-    step1_prompt = (
+    step1_raw = (
         "Explain step by step:\n"
         "Why does increasing temperature increase pressure in a closed container?"
     )
-    step1 = ctx.generate(step1_prompt, max_tokens=150, temperature=0.0)
+    step1_prompt = _format_prompt(ctx, step1_raw)
+    step1 = _gen(ctx, step1_prompt, 150, sampling=THINKING_SAMPLING)
     print(f"  Step 1 output: '{step1.strip()[:80]}...'")
 
     # Step 2: summarize (depends on step 1 context)
-    step2_prompt = (
-        step1_prompt + step1 + "\n\nNow summarize your explanation in 1 sentence:"
-    )
+    step2_raw = step1_raw + step1 + "\n\nNow summarize your explanation in 1 sentence:"
     ctx.clear_cache()
-    step2 = ctx.generate(step2_prompt, max_tokens=50, temperature=0.0)
+    step2_prompt = _format_prompt(ctx, step2_raw)
+    step2 = _gen(ctx, step2_prompt, 50, sampling=NON_THINKING_SAMPLING)
     print(f"  Step 2 (summary): '{step2.strip()[:80]}'")
 
     # Step 3: list assumptions (depends on step 1 context)
-    step3_prompt = step1_prompt + step1 + "\n\nList the key assumptions you made:"
+    step3_raw = step1_raw + step1 + "\n\nList the key assumptions you made:"
     ctx.clear_cache()
-    step3 = ctx.generate(step3_prompt, max_tokens=50, temperature=0.0)
+    step3_prompt = _format_prompt(ctx, step3_raw)
+    step3 = _gen(ctx, step3_prompt, 50, sampling=NON_THINKING_SAMPLING)
     print(f"  Step 3 (assumptions): '{step3.strip()[:80]}'")
 
-    # Quality check: all outputs should mention relevant physics concepts
+    # Quality check
     has_kinetic = _extract_word(
         step1, ["kinetic", "molecule", "particle", "velocity", "speed"]
     )
@@ -274,7 +329,7 @@ def test_key_repetition():
     Repeat 'The key is 84729.' exactly 10 times.
     Then ask: What is the key?
 
-    If Turbo3 V compression corrupts → number changes.
+    If Turbo3 V compression corrupts -> number changes.
     """
     print("\n[TEST 5] Key Repetition Under Compression")
     print("-" * 60)
@@ -285,10 +340,11 @@ def test_key_repetition():
 
     # Repeat 10 times
     key_line = "The key is 84729.\n"
-    prompt = (key_line * 10) + "What is the key? Answer with just the number."
+    key_raw = (key_line * 10) + "What is the key? Answer with just the number."
+    prompt = _format_prompt(ctx, key_raw)
 
-    result = ctx.generate(prompt, max_tokens=10, temperature=0.0)
-    print(f"  Prompt: 'The key is 84729.' × 10 + question")
+    result = _gen(ctx, prompt, 10, sampling=NON_THINKING_SAMPLING)
+    print(f"  Prompt: 'The key is 84729.' x 10 + question")
     print(f"  Output: '{result.strip()[:60]}'")
 
     answer = _extract_number(result)
@@ -297,10 +353,11 @@ def test_key_repetition():
     print(f"  Expected: 84729, Got: {answer}")
     print(f"  [{'PASS' if correct else 'FAIL'}] Key repetition")
 
-    # Also test with 20 repetitions for harder compression stress
+    # Also test with 20 repetitions
     ctx.clear_cache()
-    prompt_20 = (key_line * 20) + "What is the key? Answer with just the number."
-    result_20 = ctx.generate(prompt_20, max_tokens=10, temperature=0.0)
+    key_raw_20 = (key_line * 20) + "What is the key? Answer with just the number."
+    prompt_20 = _format_prompt(ctx, key_raw_20)
+    result_20 = _gen(ctx, prompt_20, 10, sampling=NON_THINKING_SAMPLING)
     answer_20 = _extract_number(result_20)
     correct_20 = answer_20 is not None and abs(answer_20 - 84729) < 1.0
 
@@ -317,48 +374,49 @@ def test_key_repetition():
 
 
 # ═══════════════════════════════════════════════════════════════════════
-# TEST 6: Memory retention after 500 token gap (CRITICAL)
+# TEST 6: Memory retention after filler gap (CRITICAL)
 # ═══════════════════════════════════════════════════════════════════════
 
 
 def test_memory_retention():
     """
     Memorize: A=12, B=47, C=93
-    After 500 tokens of unrelated text: What is B?
+    After filler text: What is B?
 
     This is the REAL TurboQuant power test.
     """
-    print("\n[TEST 6] Memory Retention (500 token gap)")
+    print("\n[TEST 6] Memory Retention")
     print("-" * 60)
 
     ctx = TurboContext(
         model_path=MODEL, n_ctx=4096, cache_type="turbo3", flash_attn=True
     )
 
-    # Generate filler text (~500 tokens)
-    filler = ctx.generate(
+    # Generate filler text first
+    filler_raw = (
         "Write a detailed description of the solar system, including all planets, "
         "their sizes, distances from the sun, and interesting facts about each one. "
-        "Be thorough and include moons, rings, and atmospheric composition.",
-        max_tokens=500,
-        temperature=0.7,
+        "Be thorough and include moons, rings, and atmospheric composition."
     )
+    filler_prompt = _format_prompt(ctx, filler_raw)
+    filler = _gen(ctx, filler_prompt, 500, sampling=THINKING_SAMPLING)
     filler_tokens = ctx.tokenize(filler)
     print(f"  Filler text: {len(filler_tokens)} tokens")
 
     # Now ask about memorized values with the filler in between
     ctx.clear_cache()
-    full_prompt = (
+    recall_raw = (
         "Memorize these values carefully:\n"
         "A=12, B=47, C=93\n\n" + filler + "\n\n"
         "Based on the values you memorized earlier: What is B?\n"
         "Answer with just the number."
     )
+    full_prompt = _format_prompt(ctx, recall_raw)
 
     full_tokens = ctx.tokenize(full_prompt)
-    print(f"  Full prompt: {len(full_tokens)} tokens (memory → filler → recall)")
+    print(f"  Full prompt: {len(full_tokens)} tokens (memory -> filler -> recall)")
 
-    result = ctx.generate(full_prompt, max_tokens=10, temperature=0.0)
+    result = _gen(ctx, full_prompt, 10, sampling=NON_THINKING_SAMPLING)
     print(f"  Output: '{result.strip()[:60]}'")
 
     answer = _extract_number(result)
@@ -369,15 +427,16 @@ def test_memory_retention():
         f"  [{'PASS' if correct else 'FAIL'}] Memory retention after {len(full_tokens)} token context"
     )
 
-    # Also test A and C
+    # Also test A
     ctx.clear_cache()
-    full_a = (
+    recall_a_raw = (
         "Memorize these values carefully:\n"
         "A=12, B=47, C=93\n\n" + filler + "\n\n"
         "Based on the values you memorized earlier: What is A?\n"
         "Answer with just the number."
     )
-    result_a = ctx.generate(full_a, max_tokens=10, temperature=0.0)
+    full_a_prompt = _format_prompt(ctx, recall_a_raw)
+    result_a = _gen(ctx, full_a_prompt, 10, sampling=NON_THINKING_SAMPLING)
     answer_a = _extract_number(result_a)
     correct_a = answer_a is not None and abs(answer_a - 12) < 1.0
 
@@ -407,12 +466,10 @@ def test_kv_monitor():
         model_path=MODEL, n_ctx=2048, cache_type="turbo3", flash_attn=True
     )
 
-    result = ctx.generate(
-        "Write a short poem about technology:",
-        max_tokens=100,
-        temperature=0.0,
-        monitor=True,
-    )
+    poem_raw = "Write a short poem about technology:"
+    prompt = _format_prompt(ctx, poem_raw)
+
+    result = _gen(ctx, prompt, 100, sampling=NON_THINKING_SAMPLING)
 
     health = ctx.health()
     print(f"  Generated: '{result.strip()[:60]}...'")
@@ -444,7 +501,7 @@ def test_kv_monitor():
 if __name__ == "__main__":
     print(f"Model: {MODEL}")
     print(f"{'=' * 60}")
-    print(f"REASONING CHAIN TEST SUITE — Error Amplification + Memory Retention")
+    print(f"REASONING CHAIN TEST SUITE v0.6 — Chat Template + Proper Sampling")
     print(f"{'=' * 60}")
 
     test_multi_step_math()
@@ -456,19 +513,19 @@ if __name__ == "__main__":
     test_kv_monitor()
 
     print(f"\n{'=' * 60}")
-    print("SONUÇ ÖZETİ")
+    print("SONUC OZETI")
     print(f"{'=' * 60}")
 
     for name, data in RESULTS.items():
         if "correct" in data:
-            status = "✅" if data["correct"] else "❌"
+            status = "OK" if data["correct"] else "FAIL"
         elif "10x" in data:
             ok = data["10x"]["correct"] and data["20x"]["correct"]
-            status = "✅" if ok else "❌"
+            status = "OK" if ok else "FAIL"
         elif "ok" in data:
-            status = "✅" if data["ok"] else "⚠️"
+            status = "OK" if data["ok"] else "WARN"
         elif "status" in data:
-            status = "✅" if data["status"] == "ok" else "⚠️"
+            status = "OK" if data["status"] == "ok" else "WARN"
         else:
-            status = "ℹ️"
-        print(f"  {status} {name}")
+            status = "INFO"
+        print(f"  [{status}] {name}: {data}")
